@@ -10,12 +10,12 @@ import config
 import database
 import jupiter_dca
 import token_data as td
-from analyzer import analyze_dca_order, compute_crime_score
+from analyzer import analyze_dca_order, compute_conviction_score
 from alerts import send_alert
 
 logger = logging.getLogger(__name__)
 
-MIN_ALERT_SCORE = 20.0
+MIN_CONVICTION = 30.0
 
 
 async def scan_cycle(session: aiohttp.ClientSession) -> dict:
@@ -100,12 +100,13 @@ async def scan_cycle(session: aiohttp.ClientSession) -> dict:
         try:
             token_info = token_info_map.get(output_mint)
 
-            # Skip tokens above max market cap (if we know the mcap)
-            if token_info and token_info.get("market_cap", 0) > config.MAX_MARKET_CAP:
-                if token_info["market_cap"] > 0:
+            # Only analyze tokens in the $20M-$50M mcap range
+            if token_info:
+                mcap = token_info.get("market_cap", 0)
+                if mcap > 0 and (mcap < config.MIN_MARKET_CAP or mcap > config.MAX_MARKET_CAP):
                     logger.debug(
-                        "Skipping %s - mcap %s above threshold",
-                        output_mint[:16], token_info["market_cap"],
+                        "Skipping %s - mcap $%.0f outside $20M-$50M range",
+                        output_mint[:16], mcap,
                     )
                     continue
 
@@ -144,14 +145,14 @@ async def scan_cycle(session: aiohttp.ClientSession) -> dict:
             unique_signals = list(best_per_type.values())
             stats["signals_found"] += len(unique_signals)
 
-            crime_score = compute_crime_score(unique_signals)
+            conviction = compute_conviction_score(unique_signals)
 
-            if crime_score < MIN_ALERT_SCORE:
+            if conviction < MIN_CONVICTION:
                 continue
 
-            # Send alert for the highest-severity signal
+            # Send alert for the highest-conviction signal
             best_signal = max(unique_signals, key=lambda s: s.score)
-            sent = await send_alert(best_signal, crime_score, token_info)
+            sent = await send_alert(best_signal, conviction, token_info)
             if sent:
                 stats["alerts_sent"] += 1
 
@@ -174,9 +175,9 @@ async def run_scanner() -> None:
     logger.info("DCA Order Tracker started")
     logger.info("Monitoring: Jupiter DCA program on Solana")
     logger.info(
-        "Config: max_mcap=$%s, min_dca=$%s, interval=%ds",
-        config.MAX_MARKET_CAP, config.MIN_DCA_VALUE_USD,
-        config.SCAN_INTERVAL_SECONDS,
+        "Config: mcap=$%s-$%s, min_dca=$%s, interval=%ds",
+        config.MIN_MARKET_CAP, config.MAX_MARKET_CAP,
+        config.MIN_DCA_VALUE_USD, config.SCAN_INTERVAL_SECONDS,
     )
 
     if not config.HELIUS_API_KEY:

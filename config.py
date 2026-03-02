@@ -23,11 +23,12 @@ KNOWN_BASE_MINTS = {
 
 # Scanner settings
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "120"))
-MAX_MARKET_CAP = float(os.getenv("MAX_MARKET_CAP", "50000000"))
-MIN_DCA_VALUE_USD = float(os.getenv("MIN_DCA_VALUE_USD", "500"))
-DCA_CLUSTER_WINDOW_HOURS = int(os.getenv("DCA_CLUSTER_WINDOW_HOURS", "24"))
-DCA_CLUSTER_MIN_ORDERS = int(os.getenv("DCA_CLUSTER_MIN_ORDERS", "3"))
-ALERT_COOLDOWN_HOURS = int(os.getenv("ALERT_COOLDOWN_HOURS", "4"))
+MIN_MARKET_CAP = float(os.getenv("MIN_MARKET_CAP", "20000000"))   # $20M floor
+MAX_MARKET_CAP = float(os.getenv("MAX_MARKET_CAP", "50000000"))   # $50M ceiling
+MIN_DCA_VALUE_USD = float(os.getenv("MIN_DCA_VALUE_USD", "500000"))  # $500K minimum
+COORDINATED_WINDOW_HOURS = int(os.getenv("COORDINATED_WINDOW_HOURS", "24"))
+COORDINATED_MIN_VALUE_USD = float(os.getenv("COORDINATED_MIN_VALUE_USD", "500000"))
+ALERT_COOLDOWN_HOURS = int(os.getenv("ALERT_COOLDOWN_HOURS", "6"))
 
 # Jupiter Price API (free, no key needed)
 JUPITER_PRICE_API = "https://api.jup.ag/price/v2"

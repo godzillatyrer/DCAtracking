@@ -1,4 +1,9 @@
-"""Detect suspicious DCA accumulation patterns on low-cap tokens."""
+"""Detect high-conviction DCA accumulation on $20-50M tokens.
+
+Only fires on genuinely large capital deployment — the kind of DCA
+that protects a level or signals insider accumulation before a move.
+Designed for leveraged long entries, not noise.
+"""
 
 import logging
 from dataclasses import dataclass, field
@@ -11,158 +16,127 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Signal:
-    """A detected signal for a token."""
     token_mint: str
-    signal_type: str  # large_dca, dca_cluster, dca_on_dead_token, whale_dca
-    severity: str     # low, medium, high, critical
-    score: float      # 0-100
+    signal_type: str   # mega_dca, coordinated_accumulation
+    severity: str      # high, critical
+    score: float       # 0-100
     details: dict = field(default_factory=dict)
 
 
 def analyze_dca_order(order: dict, token_data: dict | None) -> list[Signal]:
-    """Analyze a DCA order for suspicious patterns.
+    """Analyze a single DCA order. Only returns signals for serious capital.
 
-    Args:
-        order: DCA order data from jupiter_dca
-        token_data: Token info from token_data (can be None)
-
-    Returns:
-        List of signals detected.
+    Filters:
+    - Token mcap must be $20M-$50M
+    - Single order must be >= $500K, OR
+    - Multiple orders on same token totalling >= $500K in 24h
     """
     signals = []
     output_mint = order["output_mint"]
     in_amount_usd = order.get("in_amount_usd", 0) or 0
 
-    mcap = token_data.get("market_cap", 0) if token_data else 0
-    volume_24h = token_data.get("volume_24h", 0) if token_data else 0
+    if not token_data:
+        return signals
 
-    # --- Signal 1: Large DCA relative to token's daily volume ---
+    mcap = token_data.get("market_cap", 0)
+    volume_24h = token_data.get("volume_24h", 0)
+    liquidity = token_data.get("liquidity_usd", 0)
+
+    # Hard filter: only $20M-$50M mcap tokens
+    if mcap > 0 and (mcap < config.MIN_MARKET_CAP or mcap > config.MAX_MARKET_CAP):
+        return signals
+
+    # --- Signal 1: Mega DCA ---
+    # Single order >= $500K on a $20-50M token. Someone is defending a level
+    # or accumulating heavily before a catalyst.
     if in_amount_usd >= config.MIN_DCA_VALUE_USD:
-        if volume_24h > 0 and in_amount_usd > volume_24h * 0.1:
-            ratio = in_amount_usd / volume_24h
-            signals.append(Signal(
-                token_mint=output_mint,
-                signal_type="large_dca",
-                severity=_size_severity(ratio),
-                score=min(ratio * 50, 100),
-                details={
-                    "dca_value_usd": round(in_amount_usd, 2),
-                    "volume_24h": round(volume_24h, 2),
-                    "size_vs_volume": round(ratio, 2),
-                    "user_wallet": order["user_wallet"],
-                    "total_cycles": order.get("total_cycles", 0),
-                    "cycle_frequency_hours": order.get("cycle_frequency_seconds", 0) / 3600,
-                },
-            ))
-        elif volume_24h == 0 and in_amount_usd >= config.MIN_DCA_VALUE_USD:
-            signals.append(Signal(
-                token_mint=output_mint,
-                signal_type="large_dca",
-                severity="critical",
-                score=95,
-                details={
-                    "dca_value_usd": round(in_amount_usd, 2),
-                    "volume_24h": 0,
-                    "size_vs_volume": 999,
-                    "user_wallet": order["user_wallet"],
-                    "total_cycles": order.get("total_cycles", 0),
-                    "cycle_frequency_hours": order.get("cycle_frequency_seconds", 0) / 3600,
-                },
-            ))
+        pct_of_mcap = (in_amount_usd / mcap * 100) if mcap > 0 else 0
+        pct_of_volume = (in_amount_usd / volume_24h) if volume_24h > 0 else 999
 
-    # --- Signal 2: DCA Cluster (multiple orders targeting same token) ---
-    recent_count = database.get_dca_order_count(
-        output_mint, hours=config.DCA_CLUSTER_WINDOW_HOURS
-    )
-    if recent_count >= config.DCA_CLUSTER_MIN_ORDERS:
-        total_value = database.get_total_dca_value(
-            output_mint, hours=config.DCA_CLUSTER_WINDOW_HOURS
-        )
-        unique_wallets = database.get_unique_dca_wallets(
-            output_mint, hours=config.DCA_CLUSTER_WINDOW_HOURS
-        )
+        # Calculate DCA duration (how long the buy pressure lasts)
+        cycle_freq = order.get("cycle_frequency_seconds", 0)
+        total_cycles = order.get("total_cycles", 0)
+        duration_hours = (cycle_freq * total_cycles / 3600) if cycle_freq and total_cycles else 0
+        per_cycle_usd = in_amount_usd / total_cycles if total_cycles > 0 else in_amount_usd
 
-        severity = "medium"
-        if recent_count >= 5 or unique_wallets >= 3:
-            severity = "high"
-        if recent_count >= 10 or (volume_24h > 0 and total_value > volume_24h * 0.5):
-            severity = "critical"
+        severity = "critical" if in_amount_usd >= 1_000_000 else "high"
+        score = min(pct_of_mcap * 20, 100)  # 5% of mcap = score 100
 
         signals.append(Signal(
             token_mint=output_mint,
-            signal_type="dca_cluster",
+            signal_type="mega_dca",
             severity=severity,
-            score=min(recent_count * 15 + unique_wallets * 10, 100),
-            details={
-                "order_count": recent_count,
-                "total_value_usd": round(total_value, 2),
-                "unique_wallets": unique_wallets,
-                "window_hours": config.DCA_CLUSTER_WINDOW_HOURS,
-                "volume_24h": round(volume_24h, 2),
-            },
-        ))
-
-    # --- Signal 3: DCA on Dead/Low-Volume Token ---
-    avg_vol = database.get_avg_volume(output_mint, hours=72)
-    if avg_vol is not None and avg_vol < 5000:
-        if in_amount_usd >= 100:
-            revival_ratio = in_amount_usd / max(avg_vol, 1)
-            signals.append(Signal(
-                token_mint=output_mint,
-                signal_type="dca_on_dead_token",
-                severity="high" if revival_ratio > 1 else "medium",
-                score=min(revival_ratio * 30, 100),
-                details={
-                    "dca_value_usd": round(in_amount_usd, 2),
-                    "avg_daily_volume": round(avg_vol, 2),
-                    "revival_ratio": round(revival_ratio, 2),
-                },
-            ))
-
-    # --- Signal 4: Whale DCA (very large single order) ---
-    if in_amount_usd >= 5000:
-        if in_amount_usd >= 50000:
-            severity = "critical"
-        elif in_amount_usd >= 10000:
-            severity = "high"
-        else:
-            severity = "medium"
-
-        signals.append(Signal(
-            token_mint=output_mint,
-            signal_type="whale_dca",
-            severity=severity,
-            score=min(in_amount_usd / 500, 100),
+            score=score,
             details={
                 "dca_value_usd": round(in_amount_usd, 2),
+                "pct_of_mcap": round(pct_of_mcap, 2),
+                "pct_of_daily_volume": round(pct_of_volume * 100, 1),
+                "duration_hours": round(duration_hours, 1),
+                "per_cycle_usd": round(per_cycle_usd, 2),
+                "total_cycles": total_cycles,
+                "cycle_frequency_seconds": cycle_freq,
                 "user_wallet": order["user_wallet"],
-                "total_cycles": order.get("total_cycles", 0),
-                "cycle_frequency_hours": order.get("cycle_frequency_seconds", 0) / 3600,
-                "token_mcap": round(mcap, 2),
+                "input_mint": order["input_mint"],
+                "mcap": round(mcap, 2),
+                "volume_24h": round(volume_24h, 2),
+                "liquidity_usd": round(liquidity, 2),
             },
         ))
+
+    # --- Signal 2: Coordinated Accumulation ---
+    # Multiple wallets stacking DCA on the same token, total >= $500K in 24h.
+    # This is the "group of insiders" pattern.
+    window = config.COORDINATED_WINDOW_HOURS
+    total_value = database.get_total_dca_value(output_mint, hours=window)
+
+    if total_value >= config.COORDINATED_MIN_VALUE_USD:
+        order_count = database.get_dca_order_count(output_mint, hours=window)
+        unique_wallets = database.get_unique_dca_wallets(output_mint, hours=window)
+
+        # Only fire if there are actually multiple participants
+        if order_count >= 2 and unique_wallets >= 2:
+            pct_of_mcap = (total_value / mcap * 100) if mcap > 0 else 0
+
+            severity = "critical" if total_value >= 1_000_000 or unique_wallets >= 4 else "high"
+            score = min(unique_wallets * 15 + pct_of_mcap * 10, 100)
+
+            signals.append(Signal(
+                token_mint=output_mint,
+                signal_type="coordinated_accumulation",
+                severity=severity,
+                score=score,
+                details={
+                    "total_dca_value_usd": round(total_value, 2),
+                    "order_count": order_count,
+                    "unique_wallets": unique_wallets,
+                    "window_hours": window,
+                    "pct_of_mcap": round(pct_of_mcap, 2),
+                    "mcap": round(mcap, 2),
+                    "volume_24h": round(volume_24h, 2),
+                    "liquidity_usd": round(liquidity, 2),
+                },
+            ))
 
     return signals
 
 
-def compute_crime_score(signals: list[Signal]) -> float:
-    """Compute an overall suspicion score from multiple signals.
-    Higher = more likely a coordinated pump setup."""
+def compute_conviction_score(signals: list[Signal]) -> float:
+    """Compute a conviction score for leveraged entry.
+
+    This isn't a 'crime score' — it's how confident you should be
+    that this DCA is protecting a level / accumulating for a move.
+    """
     if not signals:
         return 0.0
 
     weights = {
-        "large_dca": 25,
-        "dca_cluster": 35,
-        "dca_on_dead_token": 30,
-        "whale_dca": 20,
+        "mega_dca": 50,
+        "coordinated_accumulation": 60,
     }
 
     severity_mult = {
-        "low": 0.5,
-        "medium": 1.0,
-        "high": 1.5,
-        "critical": 2.0,
+        "high": 1.0,
+        "critical": 1.5,
     }
 
     total = 0.0
@@ -171,21 +145,9 @@ def compute_crime_score(signals: list[Signal]) -> float:
         mult = severity_mult.get(signal.severity, 1.0)
         total += (signal.score / 100) * weight * mult
 
-    # Bonus for multiple signal types firing on the same token
+    # Both signals firing = very high conviction
     unique_types = len(set(s.signal_type for s in signals))
-    if unique_types >= 3:
-        total *= 1.5
-    elif unique_types >= 2:
-        total *= 1.2
+    if unique_types >= 2:
+        total *= 1.4
 
     return min(total, 100.0)
-
-
-def _size_severity(ratio: float) -> str:
-    if ratio >= 1.0:
-        return "critical"
-    elif ratio >= 0.5:
-        return "high"
-    elif ratio >= 0.1:
-        return "medium"
-    return "low"
