@@ -1,4 +1,4 @@
-"""Telegram alert system for sending notifications about suspicious tokens."""
+"""Telegram alert system for DCA order detection."""
 
 import logging
 
@@ -12,10 +12,10 @@ from analyzer import Signal
 logger = logging.getLogger(__name__)
 
 SIGNAL_EMOJI = {
-    "volume_spike": "\U0001f4c8",     # chart increasing
-    "buy_pressure": "\U0001f6a8",     # rotating light
-    "dead_revival": "\U0001f480",     # skull (back from dead)
-    "accumulation": "\U0001f575",     # detective
+    "large_dca": "\U0001f4b0",        # money bag
+    "dca_cluster": "\U0001f6a8",       # rotating light
+    "dca_on_dead_token": "\U0001f480",  # skull
+    "whale_dca": "\U0001f40b",         # whale
 }
 
 SEVERITY_EMOJI = {
@@ -23,12 +23,6 @@ SEVERITY_EMOJI = {
     "medium": "\U0001f7e1",    # yellow circle
     "high": "\U0001f7e0",      # orange circle
     "critical": "\U0001f534",  # red circle
-}
-
-CHAIN_NAMES = {
-    "solana": "Solana",
-    "ethereum": "Ethereum",
-    "bsc": "BSC",
 }
 
 
@@ -40,133 +34,133 @@ def _format_usd(value: float) -> str:
     return f"${value:.2f}"
 
 
-def _format_number(value: float) -> str:
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M"
-    if value >= 1_000:
-        return f"{value / 1_000:.1f}K"
-    return f"{value:.0f}"
-
-
-def format_signal_message(signal: Signal, crime_score: float,
-                          token_data: dict) -> str:
-    """Format a signal into a readable Telegram message."""
-
-    sig_emoji = SIGNAL_EMOJI.get(signal.signal_type, "\U00002753")
-    sev_emoji = SEVERITY_EMOJI.get(signal.severity, "\U000026aa")
-    chain_name = CHAIN_NAMES.get(signal.chain, signal.chain.upper())
-
-    # Header
-    lines = [
-        f"{sig_emoji} <b>{_signal_title(signal.signal_type)}</b> {sev_emoji}",
-        "",
-        f"<b>{signal.symbol}</b> ({signal.name})",
-        f"Chain: {chain_name}",
-        f"Crime Score: <b>{crime_score:.0f}/100</b> {'🔥' if crime_score >= 60 else ''}",
-        "",
-    ]
-
-    # Price info
-    price = token_data.get("price_usd", 0)
-    mcap = token_data.get("market_cap", 0)
-    liq = token_data.get("liquidity_usd", 0)
-    lines.append(f"Price: ${price:.8f}" if price < 0.01 else f"Price: ${price:.4f}")
-    lines.append(f"Market Cap: {_format_usd(mcap)}")
-    lines.append(f"Liquidity: {_format_usd(liq)}")
-    lines.append("")
-
-    # Signal-specific details
-    details = signal.details
-    if signal.signal_type == "volume_spike":
-        lines.append(f"1h Volume: {_format_usd(details.get('current_1h_volume', 0))}")
-        lines.append(f"Avg 1h Volume: {_format_usd(details.get('avg_1h_volume', 0))}")
-        lines.append(f"Spike: <b>{details.get('volume_ratio', 0)}x</b> normal")
-
-    elif signal.signal_type == "buy_pressure":
-        lines.append(f"Buy Ratio (1h): <b>{details.get('buy_ratio_1h', 0):.0%}</b>")
-        lines.append(f"Buy Ratio (6h): <b>{details.get('buy_ratio_6h', 0):.0%}</b>")
-        lines.append(
-            f"Buys/Sells (1h): {details.get('buys_1h', 0)}/{details.get('sells_1h', 0)}"
-        )
-        lines.append(
-            f"Buys/Sells (6h): {details.get('buys_6h', 0)}/{details.get('sells_6h', 0)}"
-        )
-
-    elif signal.signal_type == "dead_revival":
-        lines.append(
-            f"Previous Avg Volume: {_format_usd(details.get('prev_avg_volume', 0))}"
-        )
-        lines.append(f"Current 1h Volume: {_format_usd(details.get('current_1h_volume', 0))}")
-        lines.append(f"Revival: <b>{details.get('revival_ratio', 0)}x</b> increase")
-
-    elif signal.signal_type == "accumulation":
-        lines.append(
-            f"Buy Spike: <b>{details.get('buy_spike_ratio', 0)}x</b> normal buys"
-        )
-        lines.append(f"Price Change (1h): {details.get('price_change_1h', 0):+.1f}%")
-        lines.append(f"1h Volume: {_format_usd(details.get('volume_1h', 0))}")
-        lines.append("Stealth accumulation - price hasn't moved yet")
-
-    lines.append("")
-
-    # Volume & transaction summary
-    lines.append(
-        f"24h Vol: {_format_usd(token_data.get('volume_24h', 0))} | "
-        f"Buys: {_format_number(token_data.get('buys_24h', 0))} | "
-        f"Sells: {_format_number(token_data.get('sells_24h', 0))}"
-    )
-
-    # Price changes
-    lines.append(
-        f"Change: 1h {token_data.get('price_change_1h', 0):+.1f}% | "
-        f"6h {token_data.get('price_change_6h', 0):+.1f}% | "
-        f"24h {token_data.get('price_change_24h', 0):+.1f}%"
-    )
-
-    # DexScreener link
-    dex_url = token_data.get("dex_url", "")
-    if dex_url:
-        lines.append("")
-        lines.append(f'<a href="{dex_url}">View on DexScreener</a>')
-
-    # Token address (for easy copy)
-    lines.append("")
-    lines.append(f"<code>{signal.token_address}</code>")
-
-    return "\n".join(lines)
-
-
 def _signal_title(signal_type: str) -> str:
     titles = {
-        "volume_spike": "VOLUME SPIKE DETECTED",
-        "buy_pressure": "HEAVY BUY PRESSURE",
-        "dead_revival": "DEAD TOKEN REVIVAL",
-        "accumulation": "STEALTH ACCUMULATION",
+        "large_dca": "LARGE DCA ORDER DETECTED",
+        "dca_cluster": "DCA ORDER CLUSTER",
+        "dca_on_dead_token": "DCA ON DEAD TOKEN",
+        "whale_dca": "WHALE DCA ORDER",
     }
     return titles.get(signal_type, signal_type.upper())
 
 
-async def send_alert(signal: Signal, crime_score: float,
-                     token_data: dict) -> bool:
-    """Send alert via Telegram if not recently sent."""
+def format_alert_message(signal: Signal, crime_score: float,
+                         token_data: dict | None) -> str:
+    """Format a DCA signal into a readable Telegram message."""
+    sig_emoji = SIGNAL_EMOJI.get(signal.signal_type, "\U00002753")
+    sev_emoji = SEVERITY_EMOJI.get(signal.severity, "\U000026aa")
 
+    lines = [
+        f"{sig_emoji} <b>{_signal_title(signal.signal_type)}</b> {sev_emoji}",
+        "",
+    ]
+
+    # Token info
+    symbol = token_data.get("symbol", "???") if token_data else "???"
+    name = token_data.get("name", "") if token_data else ""
+    lines.append(f"<b>{symbol}</b> ({name})")
+    lines.append("Chain: Solana")
+    lines.append(f"Suspicion Score: <b>{crime_score:.0f}/100</b>")
+    lines.append("")
+
+    # Price info
+    if token_data:
+        price = token_data.get("price_usd", 0)
+        mcap = token_data.get("market_cap", 0)
+        vol = token_data.get("volume_24h", 0)
+        liq = token_data.get("liquidity_usd", 0)
+
+        lines.append(f"Price: ${price:.8f}" if price < 0.01 else f"Price: ${price:.4f}")
+        if mcap:
+            lines.append(f"Market Cap: {_format_usd(mcap)}")
+        lines.append(f"24h Volume: {_format_usd(vol)}")
+        if liq:
+            lines.append(f"Liquidity: {_format_usd(liq)}")
+        lines.append("")
+
+    # Signal-specific details
+    d = signal.details
+    if signal.signal_type == "large_dca":
+        lines.append(f"DCA Value: <b>{_format_usd(d.get('dca_value_usd', 0))}</b>")
+        size_vs = d.get('size_vs_volume', 0)
+        if size_vs < 999:
+            lines.append(f"vs 24h Volume: <b>{size_vs:.1f}x</b>")
+        else:
+            lines.append("vs 24h Volume: <b>token has ZERO volume</b>")
+        cycles = d.get('total_cycles', 0)
+        freq = d.get('cycle_frequency_hours', 0)
+        if cycles:
+            lines.append(f"Cycles: {cycles}")
+        if freq:
+            lines.append(f"Frequency: every {freq:.1f}h")
+        wallet = d.get('user_wallet', '')
+        if wallet:
+            lines.append(f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>")
+
+    elif signal.signal_type == "dca_cluster":
+        window = d.get('window_hours', 24)
+        lines.append(f"Orders (last {window}h): <b>{d.get('order_count', 0)}</b>")
+        lines.append(f"Total DCA Value: <b>{_format_usd(d.get('total_value_usd', 0))}</b>")
+        lines.append(f"Unique Wallets: <b>{d.get('unique_wallets', 0)}</b>")
+        vol = d.get('volume_24h', 0)
+        if vol:
+            lines.append(f"vs 24h Volume: {_format_usd(vol)}")
+
+    elif signal.signal_type == "dca_on_dead_token":
+        lines.append(f"DCA Value: <b>{_format_usd(d.get('dca_value_usd', 0))}</b>")
+        lines.append(f"Avg Daily Volume: {_format_usd(d.get('avg_daily_volume', 0))}")
+        lines.append(f"Revival Ratio: <b>{d.get('revival_ratio', 0):.1f}x</b>")
+        lines.append("<i>Token was essentially dead - now being DCA'd into</i>")
+
+    elif signal.signal_type == "whale_dca":
+        lines.append(f"DCA Value: <b>{_format_usd(d.get('dca_value_usd', 0))}</b>")
+        cycles = d.get('total_cycles', 0)
+        freq = d.get('cycle_frequency_hours', 0)
+        if cycles:
+            lines.append(f"Cycles: {cycles}")
+        if freq:
+            lines.append(f"Frequency: every {freq:.1f}h")
+        wallet = d.get('user_wallet', '')
+        if wallet:
+            lines.append(f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>")
+        if d.get('token_mcap'):
+            lines.append(f"Token MCap: {_format_usd(d['token_mcap'])}")
+
+    # Links
+    mint = signal.token_mint
+    lines.append("")
+    lines.append(
+        f'<a href="https://birdeye.so/token/{mint}?chain=solana">Birdeye</a> | '
+        f'<a href="https://solscan.io/token/{mint}">Solscan</a> | '
+        f'<a href="https://dexscreener.com/solana/{mint}">DexScreener</a>'
+    )
+    lines.append("")
+    lines.append(f"<code>{mint}</code>")
+
+    return "\n".join(lines)
+
+
+async def send_alert(signal: Signal, crime_score: float,
+                     token_data: dict | None) -> bool:
+    """Send alert via Telegram if not recently sent."""
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         logger.warning("Telegram not configured, logging alert to console")
-        msg = format_signal_message(signal, crime_score, token_data)
+        msg = format_alert_message(signal, crime_score, token_data)
         logger.info("ALERT:\n%s", msg)
-        return False
+        return True
 
-    # Check cooldown to avoid spam
+    # Check cooldown
     if database.was_alert_sent_recently(
-        signal.token_address, signal.chain, signal.signal_type
+        signal.token_mint, signal.signal_type,
+        cooldown_hours=config.ALERT_COOLDOWN_HOURS,
     ):
         logger.debug(
-            "Skipping alert for %s/%s - already sent recently",
-            signal.symbol, signal.signal_type,
+            "Skipping alert for %s/%s - cooldown active",
+            signal.token_mint[:16], signal.signal_type,
         )
         return False
 
-    msg = format_signal_message(signal, crime_score, token_data)
+    msg = format_alert_message(signal, crime_score, token_data)
 
     try:
         bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
@@ -176,12 +170,10 @@ async def send_alert(signal: Signal, crime_score: float,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-        database.record_alert(
-            signal.token_address, signal.chain, signal.signal_type, msg
-        )
+        database.record_alert(signal.token_mint, signal.signal_type, msg)
         logger.info(
-            "Alert sent for %s (%s) - %s [score: %.0f]",
-            signal.symbol, signal.chain, signal.signal_type, crime_score,
+            "Alert sent: %s - %s [score: %.0f]",
+            signal.token_mint[:16], signal.signal_type, crime_score,
         )
         return True
     except Exception as e:

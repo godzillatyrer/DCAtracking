@@ -16,28 +16,35 @@ def init_db() -> None:
     cursor = conn.cursor()
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS token_snapshots (
+        CREATE TABLE IF NOT EXISTS dca_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chain TEXT NOT NULL,
-            pair_address TEXT NOT NULL,
-            token_address TEXT NOT NULL,
-            token_symbol TEXT NOT NULL,
-            token_name TEXT NOT NULL,
+            tx_signature TEXT UNIQUE NOT NULL,
+            dca_account TEXT NOT NULL,
+            user_wallet TEXT NOT NULL,
+            input_mint TEXT NOT NULL,
+            output_mint TEXT NOT NULL,
+            in_amount_raw INTEGER NOT NULL,
+            in_amount_per_cycle_raw INTEGER NOT NULL,
+            cycle_frequency_seconds INTEGER NOT NULL,
+            in_amount_usd REAL,
+            total_cycles INTEGER,
+            token_symbol TEXT,
+            token_name TEXT,
+            token_mcap REAL,
+            token_price REAL,
+            timestamp REAL NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS token_volume (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_mint TEXT NOT NULL,
+            chain TEXT NOT NULL DEFAULT 'solana',
+            volume_24h REAL,
             price_usd REAL,
             market_cap REAL,
             liquidity_usd REAL,
-            volume_24h REAL,
-            volume_6h REAL,
-            volume_1h REAL,
-            price_change_24h REAL,
-            price_change_6h REAL,
-            price_change_1h REAL,
-            buys_24h INTEGER,
-            sells_24h INTEGER,
-            buys_6h INTEGER,
-            sells_6h INTEGER,
-            buys_1h INTEGER,
-            sells_1h INTEGER,
             timestamp REAL NOT NULL
         )
     """)
@@ -45,8 +52,7 @@ def init_db() -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS alerts_sent (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token_address TEXT NOT NULL,
-            chain TEXT NOT NULL,
+            token_mint TEXT NOT NULL,
             alert_type TEXT NOT NULL,
             message TEXT,
             timestamp REAL NOT NULL
@@ -54,54 +60,140 @@ def init_db() -> None:
     """)
 
     cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_snapshots_token
-        ON token_snapshots(token_address, chain, timestamp)
+        CREATE TABLE IF NOT EXISTS scanner_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
     """)
 
     cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dca_output_mint
+        ON dca_orders(output_mint, timestamp)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dca_timestamp
+        ON dca_orders(timestamp)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_volume_token
+        ON token_volume(token_mint, chain, timestamp)
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_alerts_token
-        ON alerts_sent(token_address, chain, timestamp)
+        ON alerts_sent(token_mint, alert_type, timestamp)
     """)
 
     conn.commit()
     conn.close()
 
 
-def save_snapshot(data: dict) -> None:
+def save_dca_order(order: dict) -> bool:
+    """Save a DCA order. Returns True if new (not duplicate)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT OR IGNORE INTO dca_orders (
+                tx_signature, dca_account, user_wallet,
+                input_mint, output_mint,
+                in_amount_raw, in_amount_per_cycle_raw, cycle_frequency_seconds,
+                in_amount_usd, total_cycles,
+                token_symbol, token_name, token_mcap, token_price,
+                timestamp
+            ) VALUES (
+                :tx_signature, :dca_account, :user_wallet,
+                :input_mint, :output_mint,
+                :in_amount_raw, :in_amount_per_cycle_raw, :cycle_frequency_seconds,
+                :in_amount_usd, :total_cycles,
+                :token_symbol, :token_name, :token_mcap, :token_price,
+                :timestamp
+            )
+        """, order)
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_recent_dca_orders(output_mint: str, hours: int = 24) -> list[dict]:
+    """Get recent DCA orders for a specific output token."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cutoff = time.time() - (hours * 3600)
+    cursor.execute("""
+        SELECT * FROM dca_orders
+        WHERE output_mint = ? AND timestamp > ?
+        ORDER BY timestamp DESC
+    """, (output_mint, cutoff))
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_dca_order_count(output_mint: str, hours: int = 24) -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cutoff = time.time() - (hours * 3600)
+    cursor.execute("""
+        SELECT COUNT(*) as cnt FROM dca_orders
+        WHERE output_mint = ? AND timestamp > ?
+    """, (output_mint, cutoff))
+    row = cursor.fetchone()
+    conn.close()
+    return row["cnt"]
+
+
+def get_total_dca_value(output_mint: str, hours: int = 24) -> float:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cutoff = time.time() - (hours * 3600)
+    cursor.execute("""
+        SELECT COALESCE(SUM(in_amount_usd), 0) as total_usd FROM dca_orders
+        WHERE output_mint = ? AND timestamp > ? AND in_amount_usd IS NOT NULL
+    """, (output_mint, cutoff))
+    row = cursor.fetchone()
+    conn.close()
+    return row["total_usd"]
+
+
+def get_unique_dca_wallets(output_mint: str, hours: int = 24) -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cutoff = time.time() - (hours * 3600)
+    cursor.execute("""
+        SELECT COUNT(DISTINCT user_wallet) as cnt FROM dca_orders
+        WHERE output_mint = ? AND timestamp > ?
+    """, (output_mint, cutoff))
+    row = cursor.fetchone()
+    conn.close()
+    return row["cnt"]
+
+
+def save_volume_snapshot(data: dict) -> None:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO token_snapshots (
-            chain, pair_address, token_address, token_symbol, token_name,
-            price_usd, market_cap, liquidity_usd,
-            volume_24h, volume_6h, volume_1h,
-            price_change_24h, price_change_6h, price_change_1h,
-            buys_24h, sells_24h, buys_6h, sells_6h, buys_1h, sells_1h,
-            timestamp
+        INSERT INTO token_volume (
+            token_mint, chain, volume_24h,
+            price_usd, market_cap, liquidity_usd, timestamp
         ) VALUES (
-            :chain, :pair_address, :token_address, :token_symbol, :token_name,
-            :price_usd, :market_cap, :liquidity_usd,
-            :volume_24h, :volume_6h, :volume_1h,
-            :price_change_24h, :price_change_6h, :price_change_1h,
-            :buys_24h, :sells_24h, :buys_6h, :sells_6h, :buys_1h, :sells_1h,
-            :timestamp
+            :token_mint, :chain, :volume_24h,
+            :price_usd, :market_cap, :liquidity_usd, :timestamp
         )
     """, data)
     conn.commit()
     conn.close()
 
 
-def get_historical_avg_volume(token_address: str, chain: str,
-                              hours: int = 24) -> Optional[float]:
-    """Get average 1h volume over the past N hours from stored snapshots."""
+def get_avg_volume(token_mint: str, hours: int = 72) -> Optional[float]:
+    """Get average 24h volume over the past N hours of snapshots."""
     conn = get_connection()
     cursor = conn.cursor()
     cutoff = time.time() - (hours * 3600)
     cursor.execute("""
-        SELECT AVG(volume_1h) as avg_vol
-        FROM token_snapshots
-        WHERE token_address = ? AND chain = ? AND timestamp > ?
-    """, (token_address, chain, cutoff))
+        SELECT AVG(volume_24h) as avg_vol FROM token_volume
+        WHERE token_mint = ? AND timestamp > ?
+    """, (token_mint, cutoff))
     row = cursor.fetchone()
     conn.close()
     if row and row["avg_vol"] is not None:
@@ -109,59 +201,57 @@ def get_historical_avg_volume(token_address: str, chain: str,
     return None
 
 
-def get_historical_avg_buys(token_address: str, chain: str,
-                            hours: int = 24) -> Optional[float]:
-    """Get average 1h buy count over the past N hours."""
+def get_state(key: str) -> Optional[str]:
     conn = get_connection()
     cursor = conn.cursor()
-    cutoff = time.time() - (hours * 3600)
-    cursor.execute("""
-        SELECT AVG(buys_1h) as avg_buys
-        FROM token_snapshots
-        WHERE token_address = ? AND chain = ? AND timestamp > ?
-    """, (token_address, chain, cutoff))
+    cursor.execute("SELECT value FROM scanner_state WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    if row and row["avg_buys"] is not None:
-        return row["avg_buys"]
-    return None
+    return row["value"] if row else None
 
 
-def was_alert_sent_recently(token_address: str, chain: str,
-                            alert_type: str, cooldown_hours: int = 4) -> bool:
-    """Check if we already sent an alert for this token recently."""
+def set_state(key: str, value: str) -> None:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO scanner_state (key, value) VALUES (?, ?)",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def was_alert_sent_recently(token_mint: str, alert_type: str,
+                            cooldown_hours: int = 4) -> bool:
     conn = get_connection()
     cursor = conn.cursor()
     cutoff = time.time() - (cooldown_hours * 3600)
     cursor.execute("""
-        SELECT COUNT(*) as cnt
-        FROM alerts_sent
-        WHERE token_address = ? AND chain = ? AND alert_type = ?
-              AND timestamp > ?
-    """, (token_address, chain, alert_type, cutoff))
+        SELECT COUNT(*) as cnt FROM alerts_sent
+        WHERE token_mint = ? AND alert_type = ? AND timestamp > ?
+    """, (token_mint, alert_type, cutoff))
     row = cursor.fetchone()
     conn.close()
     return row["cnt"] > 0
 
 
-def record_alert(token_address: str, chain: str,
-                 alert_type: str, message: str) -> None:
+def record_alert(token_mint: str, alert_type: str, message: str) -> None:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO alerts_sent (token_address, chain, alert_type, message, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-    """, (token_address, chain, alert_type, message, time.time()))
+        INSERT INTO alerts_sent (token_mint, alert_type, message, timestamp)
+        VALUES (?, ?, ?, ?)
+    """, (token_mint, alert_type, message, time.time()))
     conn.commit()
     conn.close()
 
 
-def cleanup_old_data(days: int = 7) -> None:
-    """Remove snapshots older than N days to keep DB size in check."""
+def cleanup_old_data(days: int = 14) -> None:
     conn = get_connection()
     cursor = conn.cursor()
     cutoff = time.time() - (days * 86400)
-    cursor.execute("DELETE FROM token_snapshots WHERE timestamp < ?", (cutoff,))
+    cursor.execute("DELETE FROM dca_orders WHERE timestamp < ?", (cutoff,))
+    cursor.execute("DELETE FROM token_volume WHERE timestamp < ?", (cutoff,))
     cursor.execute("DELETE FROM alerts_sent WHERE timestamp < ?", (cutoff,))
     conn.commit()
     conn.close()

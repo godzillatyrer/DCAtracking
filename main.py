@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-DCA Order Alert Scanner
+DCA Order Tracker
 
-Monitors Solana, Ethereum, and BSC for suspicious token activity:
-- Volume spikes on low-cap tokens (<$50M market cap)
-- Heavy buy pressure / DCA accumulation patterns
-- Dead token revivals (sudden activity on dormant tokens)
-- Stealth accumulation (buying without moving price)
+Monitors Jupiter DCA program on Solana for suspicious DCA orders on
+low-cap tokens (<$50M market cap). Detects potential pump-and-dump
+setups by identifying:
 
-Sends alerts via Telegram when potential pump setups are detected.
+- Large DCA orders on low-volume tokens
+- Clusters of DCA orders targeting the same token
+- DCA activity on dead/dormant tokens
+- Whale DCA orders
+
+Sends alerts via Telegram when suspicious patterns are detected.
 
 Usage:
-    1. Copy .env.example to .env and fill in your Telegram bot token + chat ID
+    1. Copy .env.example to .env and fill in your API keys
     2. pip install -r requirements.txt
     3. python main.py
 
-    Or run a single scan:
-    python main.py --once
+    Single scan:  python main.py --once
+    Debug mode:   python main.py -v
 """
 
 import argparse
@@ -38,9 +41,9 @@ def setup_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # Quiet down noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 
 async def run_once() -> None:
@@ -53,19 +56,24 @@ async def run_once() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="DCA Order Alert Scanner - Detect suspicious crypto activity"
+        description="DCA Order Tracker - Detect suspicious DCA activity on Solana"
     )
     parser.add_argument(
         "--once", action="store_true",
-        help="Run a single scan cycle and exit (useful for testing)"
+        help="Run a single scan cycle and exit (useful for testing)",
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
-        help="Enable debug logging"
+        help="Enable debug logging",
     )
     args = parser.parse_args()
 
     setup_logging(verbose=args.verbose)
+
+    if not config.HELIUS_API_KEY:
+        print("ERROR: HELIUS_API_KEY not set in .env file")
+        print("Get a free API key at https://helius.dev (100K credits/day)")
+        sys.exit(1)
 
     try:
         if args.once:

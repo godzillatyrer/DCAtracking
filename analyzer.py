@@ -1,7 +1,6 @@
-"""Volume anomaly detection and DCA pattern recognition."""
+"""Detect suspicious DCA accumulation patterns on low-cap tokens."""
 
 import logging
-import time
 from dataclasses import dataclass, field
 
 import database
@@ -13,164 +12,153 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Signal:
     """A detected signal for a token."""
-    token_address: str
-    chain: str
-    symbol: str
-    name: str
-    signal_type: str  # volume_spike, buy_pressure, dead_revival, accumulation
-    severity: str  # low, medium, high, critical
-    score: float  # 0-100 composite score
+    token_mint: str
+    signal_type: str  # large_dca, dca_cluster, dca_on_dead_token, whale_dca
+    severity: str     # low, medium, high, critical
+    score: float      # 0-100
     details: dict = field(default_factory=dict)
 
 
-def analyze_token(data: dict) -> list[Signal]:
-    """Analyze a single token's data for suspicious activity.
-    Returns a list of signals detected."""
+def analyze_dca_order(order: dict, token_data: dict | None) -> list[Signal]:
+    """Analyze a DCA order for suspicious patterns.
 
+    Args:
+        order: DCA order data from jupiter_dca
+        token_data: Token info from token_data (can be None)
+
+    Returns:
+        List of signals detected.
+    """
     signals = []
-    token_addr = data["token_address"]
-    chain = data["chain"]
+    output_mint = order["output_mint"]
+    in_amount_usd = order.get("in_amount_usd", 0) or 0
 
-    # Store snapshot for future comparisons
-    snapshot = {**data, "timestamp": time.time()}
-    database.save_snapshot(snapshot)
+    mcap = token_data.get("market_cap", 0) if token_data else 0
+    volume_24h = token_data.get("volume_24h", 0) if token_data else 0
 
-    # --- Signal 1: Volume Spike ---
-    # Compare current 1h volume to historical average
-    hist_vol = database.get_historical_avg_volume(token_addr, chain, hours=48)
-    if hist_vol and hist_vol > 0 and data["volume_1h"] > 0:
-        vol_ratio = data["volume_1h"] / hist_vol
-        if vol_ratio >= config.VOLUME_SPIKE_MULTIPLIER:
-            severity = _volume_severity(vol_ratio)
+    # --- Signal 1: Large DCA relative to token's daily volume ---
+    if in_amount_usd >= config.MIN_DCA_VALUE_USD:
+        if volume_24h > 0 and in_amount_usd > volume_24h * 0.1:
+            ratio = in_amount_usd / volume_24h
             signals.append(Signal(
-                token_address=token_addr,
-                chain=chain,
-                symbol=data["token_symbol"],
-                name=data["token_name"],
-                signal_type="volume_spike",
-                severity=severity,
-                score=min(vol_ratio * 10, 100),
+                token_mint=output_mint,
+                signal_type="large_dca",
+                severity=_size_severity(ratio),
+                score=min(ratio * 50, 100),
                 details={
-                    "current_1h_volume": data["volume_1h"],
-                    "avg_1h_volume": round(hist_vol, 2),
-                    "volume_ratio": round(vol_ratio, 1),
-                    "volume_24h": data["volume_24h"],
+                    "dca_value_usd": round(in_amount_usd, 2),
+                    "volume_24h": round(volume_24h, 2),
+                    "size_vs_volume": round(ratio, 2),
+                    "user_wallet": order["user_wallet"],
+                    "total_cycles": order.get("total_cycles", 0),
+                    "cycle_frequency_hours": order.get("cycle_frequency_seconds", 0) / 3600,
+                },
+            ))
+        elif volume_24h == 0 and in_amount_usd >= config.MIN_DCA_VALUE_USD:
+            signals.append(Signal(
+                token_mint=output_mint,
+                signal_type="large_dca",
+                severity="critical",
+                score=95,
+                details={
+                    "dca_value_usd": round(in_amount_usd, 2),
+                    "volume_24h": 0,
+                    "size_vs_volume": 999,
+                    "user_wallet": order["user_wallet"],
+                    "total_cycles": order.get("total_cycles", 0),
+                    "cycle_frequency_hours": order.get("cycle_frequency_seconds", 0) / 3600,
                 },
             ))
 
-    # --- Signal 2: Buy Pressure (DCA-like accumulation) ---
-    # When buys heavily outweigh sells, someone is accumulating
-    buys_1h = data["buys_1h"]
-    sells_1h = data["sells_1h"]
-    total_txns_1h = buys_1h + sells_1h
+    # --- Signal 2: DCA Cluster (multiple orders targeting same token) ---
+    recent_count = database.get_dca_order_count(
+        output_mint, hours=config.DCA_CLUSTER_WINDOW_HOURS
+    )
+    if recent_count >= config.DCA_CLUSTER_MIN_ORDERS:
+        total_value = database.get_total_dca_value(
+            output_mint, hours=config.DCA_CLUSTER_WINDOW_HOURS
+        )
+        unique_wallets = database.get_unique_dca_wallets(
+            output_mint, hours=config.DCA_CLUSTER_WINDOW_HOURS
+        )
 
-    if total_txns_1h >= 5:  # Need minimum activity
-        buy_ratio = buys_1h / total_txns_1h if total_txns_1h > 0 else 0
+        severity = "medium"
+        if recent_count >= 5 or unique_wallets >= 3:
+            severity = "high"
+        if recent_count >= 10 or (volume_24h > 0 and total_value > volume_24h * 0.5):
+            severity = "critical"
 
-        # Also check 6h window for sustained pressure
-        buys_6h = data["buys_6h"]
-        sells_6h = data["sells_6h"]
-        total_txns_6h = buys_6h + sells_6h
-        buy_ratio_6h = buys_6h / total_txns_6h if total_txns_6h > 0 else 0
+        signals.append(Signal(
+            token_mint=output_mint,
+            signal_type="dca_cluster",
+            severity=severity,
+            score=min(recent_count * 15 + unique_wallets * 10, 100),
+            details={
+                "order_count": recent_count,
+                "total_value_usd": round(total_value, 2),
+                "unique_wallets": unique_wallets,
+                "window_hours": config.DCA_CLUSTER_WINDOW_HOURS,
+                "volume_24h": round(volume_24h, 2),
+            },
+        ))
 
-        # Strong buy pressure: >75% buys in both 1h and 6h windows
-        if buy_ratio >= 0.75 and buy_ratio_6h >= 0.70:
-            severity = "high" if buy_ratio >= 0.85 else "medium"
+    # --- Signal 3: DCA on Dead/Low-Volume Token ---
+    avg_vol = database.get_avg_volume(output_mint, hours=72)
+    if avg_vol is not None and avg_vol < 5000:
+        if in_amount_usd >= 100:
+            revival_ratio = in_amount_usd / max(avg_vol, 1)
             signals.append(Signal(
-                token_address=token_addr,
-                chain=chain,
-                symbol=data["token_symbol"],
-                name=data["token_name"],
-                signal_type="buy_pressure",
-                severity=severity,
-                score=buy_ratio * 100,
+                token_mint=output_mint,
+                signal_type="dca_on_dead_token",
+                severity="high" if revival_ratio > 1 else "medium",
+                score=min(revival_ratio * 30, 100),
                 details={
-                    "buy_ratio_1h": round(buy_ratio, 2),
-                    "buy_ratio_6h": round(buy_ratio_6h, 2),
-                    "buys_1h": buys_1h,
-                    "sells_1h": sells_1h,
-                    "buys_6h": buys_6h,
-                    "sells_6h": sells_6h,
+                    "dca_value_usd": round(in_amount_usd, 2),
+                    "avg_daily_volume": round(avg_vol, 2),
+                    "revival_ratio": round(revival_ratio, 2),
                 },
             ))
 
-    # --- Signal 3: Dead Token Revival ---
-    # Token had very low historical volume but suddenly active
-    hist_avg = database.get_historical_avg_volume(token_addr, chain, hours=72)
-    if hist_avg is not None and hist_avg < config.MIN_VOLUME_USD:
-        # Was basically dead, now showing life
-        if data["volume_1h"] >= config.MIN_VOLUME_USD * 5:
-            revival_ratio = data["volume_1h"] / max(hist_avg, 1)
-            signals.append(Signal(
-                token_address=token_addr,
-                chain=chain,
-                symbol=data["token_symbol"],
-                name=data["token_name"],
-                signal_type="dead_revival",
-                severity="high",
-                score=min(revival_ratio * 5, 100),
-                details={
-                    "prev_avg_volume": round(hist_avg, 2),
-                    "current_1h_volume": data["volume_1h"],
-                    "revival_ratio": round(revival_ratio, 1),
-                },
-            ))
+    # --- Signal 4: Whale DCA (very large single order) ---
+    if in_amount_usd >= 5000:
+        if in_amount_usd >= 50000:
+            severity = "critical"
+        elif in_amount_usd >= 10000:
+            severity = "high"
+        else:
+            severity = "medium"
 
-    # --- Signal 4: Accumulation Without Price Pump (stealth buying) ---
-    # Heavy buying but price hasn't moved much yet = pre-pump accumulation
-    if data["volume_1h"] >= config.MIN_VOLUME_USD * 3:
-        price_change_1h = abs(data["price_change_1h"])
-        price_change_6h = abs(data["price_change_6h"])
-
-        # Significant volume but price barely moved (within +-5%)
-        if price_change_1h < 5 and data["buys_1h"] > data["sells_1h"] * 1.5:
-            hist_buys = database.get_historical_avg_buys(token_addr, chain, hours=48)
-            if hist_buys and hist_buys > 0:
-                buy_spike = data["buys_1h"] / hist_buys
-                if buy_spike >= 3:
-                    signals.append(Signal(
-                        token_address=token_addr,
-                        chain=chain,
-                        symbol=data["token_symbol"],
-                        name=data["token_name"],
-                        signal_type="accumulation",
-                        severity="critical",
-                        score=min(buy_spike * 15, 100),
-                        details={
-                            "buy_spike_ratio": round(buy_spike, 1),
-                            "price_change_1h": data["price_change_1h"],
-                            "price_change_6h": data["price_change_6h"],
-                            "buys_1h": data["buys_1h"],
-                            "avg_buys_1h": round(hist_buys, 1),
-                            "volume_1h": data["volume_1h"],
-                        },
-                    ))
+        signals.append(Signal(
+            token_mint=output_mint,
+            signal_type="whale_dca",
+            severity=severity,
+            score=min(in_amount_usd / 500, 100),
+            details={
+                "dca_value_usd": round(in_amount_usd, 2),
+                "user_wallet": order["user_wallet"],
+                "total_cycles": order.get("total_cycles", 0),
+                "cycle_frequency_hours": order.get("cycle_frequency_seconds", 0) / 3600,
+                "token_mcap": round(mcap, 2),
+            },
+        ))
 
     return signals
 
 
 def compute_crime_score(signals: list[Signal]) -> float:
-    """Compute an overall 'crime score' from multiple signals.
-    Higher score = more likely to be a coordinated pump setup.
-
-    Crime score combines:
-    - Volume anomalies
-    - Buy pressure patterns
-    - Dead token revival
-    - Stealth accumulation
-    """
+    """Compute an overall suspicion score from multiple signals.
+    Higher = more likely a coordinated pump setup."""
     if not signals:
         return 0.0
 
-    # Weight different signal types
     weights = {
-        "volume_spike": 20,
-        "buy_pressure": 25,
-        "dead_revival": 30,
-        "accumulation": 35,
+        "large_dca": 25,
+        "dca_cluster": 35,
+        "dca_on_dead_token": 30,
+        "whale_dca": 20,
     }
 
-    severity_multiplier = {
+    severity_mult = {
         "low": 0.5,
         "medium": 1.0,
         "high": 1.5,
@@ -180,10 +168,10 @@ def compute_crime_score(signals: list[Signal]) -> float:
     total = 0.0
     for signal in signals:
         weight = weights.get(signal.signal_type, 10)
-        mult = severity_multiplier.get(signal.severity, 1.0)
+        mult = severity_mult.get(signal.severity, 1.0)
         total += (signal.score / 100) * weight * mult
 
-    # Bonus for multiple signal types (compound suspicion)
+    # Bonus for multiple signal types firing on the same token
     unique_types = len(set(s.signal_type for s in signals))
     if unique_types >= 3:
         total *= 1.5
@@ -193,11 +181,11 @@ def compute_crime_score(signals: list[Signal]) -> float:
     return min(total, 100.0)
 
 
-def _volume_severity(ratio: float) -> str:
-    if ratio >= 20:
+def _size_severity(ratio: float) -> str:
+    if ratio >= 1.0:
         return "critical"
-    elif ratio >= 10:
+    elif ratio >= 0.5:
         return "high"
-    elif ratio >= 5:
+    elif ratio >= 0.1:
         return "medium"
     return "low"
