@@ -100,12 +100,12 @@ async def scan_cycle(session: aiohttp.ClientSession) -> dict:
         try:
             token_info = token_info_map.get(output_mint)
 
-            # Only analyze tokens in the $20M-$50M mcap range
+            # Only analyze tokens under $50M mcap
             if token_info:
                 mcap = token_info.get("market_cap", 0)
-                if mcap > 0 and (mcap < config.MIN_MARKET_CAP or mcap > config.MAX_MARKET_CAP):
+                if mcap > 0 and mcap > config.MAX_MARKET_CAP:
                     logger.debug(
-                        "Skipping %s - mcap $%.0f outside $20M-$50M range",
+                        "Skipping %s - mcap $%.0f above $50M",
                         output_mint[:16], mcap,
                     )
                     continue
@@ -175,9 +175,9 @@ async def run_scanner() -> None:
     logger.info("DCA Order Tracker started")
     logger.info("Monitoring: Jupiter DCA program on Solana")
     logger.info(
-        "Config: mcap=$%s-$%s, min_dca=$%s, interval=%ds",
-        config.MIN_MARKET_CAP, config.MAX_MARKET_CAP,
-        config.MIN_DCA_VALUE_USD, config.SCAN_INTERVAL_SECONDS,
+        "Config: max_mcap=$%s, min_dca=$%s, interval=%ds",
+        config.MAX_MARKET_CAP, config.MIN_DCA_VALUE_USD,
+        config.SCAN_INTERVAL_SECONDS,
     )
 
     if not config.HELIUS_API_KEY:

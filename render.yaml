@@ -1,0 +1,27 @@
+services:
+  - type: worker
+    name: dca-tracker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: SCAN_INTERVAL_SECONDS
+        value: "120"
+      - key: MAX_MARKET_CAP
+        value: "50000000"
+      - key: MIN_DCA_VALUE_USD
+        value: "150000"
+      - key: COORDINATED_WINDOW_HOURS
+        value: "24"
+      - key: COORDINATED_MIN_VALUE_USD
+        value: "150000"
+      - key: ALERT_COOLDOWN_HOURS
+        value: "6"
+      - key: DB_PATH
+        value: "/tmp/dca_tracker.db"

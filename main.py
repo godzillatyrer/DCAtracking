@@ -2,16 +2,15 @@
 """
 DCA Order Tracker
 
-Monitors Jupiter DCA program on Solana for suspicious DCA orders on
-low-cap tokens (<$50M market cap). Detects potential pump-and-dump
-setups by identifying:
+Monitors Jupiter DCA program on Solana for large DCA orders ($150K+)
+on sub-$50M mcap tokens. Alerts when serious capital is being deployed
+to protect a level or accumulate before a move.
 
-- Large DCA orders on low-volume tokens
-- Clusters of DCA orders targeting the same token
-- DCA activity on dead/dormant tokens
-- Whale DCA orders
+Signals:
+- Mega DCA: single order >= $150K
+- Coordinated accumulation: multiple wallets totalling >= $150K in 24h
 
-Sends alerts via Telegram when suspicious patterns are detected.
+Sends alerts via Telegram for leveraged long entries.
 
 Usage:
     1. Copy .env.example to .env and fill in your API keys
