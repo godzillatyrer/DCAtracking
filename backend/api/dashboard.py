@@ -421,6 +421,7 @@ async def run_diagnostics():
                 "action": "getcontractcreation",
                 "contractaddresses": "0x17205fab260a7a6383a81452ce6315a39370db97",
                 "apikey": settings.BSCSCAN_API_KEY,
+                "chainid": settings.BSCSCAN_CHAIN_ID,
             })
             data = resp.json()
             results["bscscan"] = {
@@ -430,6 +431,7 @@ async def run_diagnostics():
                 "response_status": data.get("status"),
                 "response_message": data.get("message"),
                 "result_preview": str(data.get("result", ""))[:200],
+                "url_used": settings.BSCSCAN_BASE_URL,
             }
     except Exception as e:
         results["bscscan"] = {"status": "error", "error": str(e)}

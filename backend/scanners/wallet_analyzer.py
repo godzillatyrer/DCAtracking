@@ -6,46 +6,24 @@ by tracing shared funding sources and synchronized buy patterns.
 Runs every 4-6 hours for candidates.
 """
 
-import asyncio
 import logging
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 
-import httpx
 from sqlalchemy.orm import Session
 
-from backend.config import settings
 from backend.database import SessionLocal
+from backend.bscscan_client import bscscan_request
 from backend.models.flagged_token import FlaggedToken
 from backend.models.known_wallet import KnownWallet
 from backend.models.watchlist import Watchlist
 
 logger = logging.getLogger(__name__)
 
-BSCSCAN_BASE = settings.BSCSCAN_BASE_URL
-API_KEY = settings.BSCSCAN_API_KEY
-RATE_LIMIT_DELAY = 0.25
-
 # Cluster detection thresholds
 MIN_SHARED_FUNDING_FOR_CLUSTER = 3  # If 3+ holders share a funding source
 FRESH_WALLET_MAX_AGE_DAYS = 30
-
-
-async def bscscan_request(params: dict) -> dict | None:
-    """Make a rate-limited request to BscScan API."""
-    params["apikey"] = API_KEY
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await client.get(BSCSCAN_BASE, params=params)
-            await asyncio.sleep(RATE_LIMIT_DELAY)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("status") == "1":
-                    return data
-        except Exception as e:
-            logger.error(f"BscScan API error: {e}")
-    return None
 
 
 async def get_token_holders_extended(contract_address: str) -> list[dict]:

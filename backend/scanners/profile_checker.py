@@ -6,24 +6,19 @@ contract metadata, and narrative classification.
 Runs every 1 hour for tokens with status='raw'.
 """
 
-import asyncio
 import logging
 from datetime import datetime
 from decimal import Decimal
 
-import httpx
 from sqlalchemy.orm import Session
 
 from backend.config import settings
 from backend.database import SessionLocal
+from backend.bscscan_client import bscscan_request
 from backend.models.flagged_token import FlaggedToken
 from backend.models.token_profile import TokenProfile
 
 logger = logging.getLogger(__name__)
-
-BSCSCAN_BASE = settings.BSCSCAN_BASE_URL
-API_KEY = settings.BSCSCAN_API_KEY
-RATE_LIMIT_DELAY = 0.25  # 250ms between requests (5 calls/sec max)
 
 # Narrative keywords for classification
 NARRATIVE_KEYWORDS = {
@@ -35,22 +30,6 @@ NARRATIVE_KEYWORDS = {
     "Web3": ["web3", "dao", "governance", "decentralized"],
     "L2": ["layer 2", "l2", "rollup", "scaling", "bridge"],
 }
-
-
-async def bscscan_request(params: dict) -> dict | None:
-    """Make a rate-limited request to BscScan API."""
-    params["apikey"] = API_KEY
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await client.get(BSCSCAN_BASE, params=params)
-            await asyncio.sleep(RATE_LIMIT_DELAY)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("status") == "1" or data.get("result"):
-                    return data
-        except Exception as e:
-            logger.error(f"BscScan API error: {e}")
-    return None
 
 
 async def get_token_supply(contract_address: str) -> Decimal | None:
