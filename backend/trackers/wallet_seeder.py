@@ -28,7 +28,7 @@ CONFIRMED_PUMPS = [
     {
         "symbol": "RAVE",
         "name": "RaveDAO",
-        "contract": "0x1aa8fd5bcce2231c6100d55bf8b377cff33acfc3",
+        "contract": "0x97693439ea2f0ecdeb9135881e49f354656a911c",
     },
     {
         "symbol": "SIREN",
