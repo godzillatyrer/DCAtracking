@@ -260,6 +260,7 @@ def get_scan_log_summary(db: Session = Depends(get_db)):
     jobs = [
         "volume_scanner", "profile_checker", "wallet_analyzer",
         "exchange_flow", "social_scanner", "wallet_tracker", "scorer", "cleanup",
+        "wallet_seeder",
     ]
     summary = []
     for job in jobs:
@@ -284,14 +285,106 @@ def get_scan_log_summary(db: Session = Depends(get_db)):
     return summary
 
 
+def _seed_exchange_wallets():
+    """Seed exchange hot wallet addresses into the database."""
+    from backend.database import SessionLocal
+    from backend.models.exchange_wallet import ExchangeWallet
+
+    EXCHANGE_HOT_WALLETS = [
+        ("0x8894e0a0c962cb723c1ef8a1b5b5b174d81bd981", "Binance", "hot_wallet"),
+        ("0xe2fc31f816a9b94326492132018c3aecc4a93ae1", "Binance", "hot_wallet"),
+        ("0xf977814e90da44bfa03b6295a0616a897441acec", "Binance", "hot_wallet"),
+        ("0x28c6c06298d514db089934071355e5743bf21d60", "Binance", "hot_wallet"),
+        ("0x21a31ee1afc51d94c2efccaa2092ad1028285549", "Binance", "hot_wallet"),
+        ("0x0d0707963952f2fba59dd06f2b425ace40b492fe", "Gate.io", "hot_wallet"),
+        ("0x1c4b70a3968436b9a0a9cf5205c787eb81bb558c", "Gate.io", "hot_wallet"),
+        ("0xf89d7b9c864f589bbf53a82105107622b35eaa40", "Bybit", "hot_wallet"),
+        ("0xd6216fc19db775df9774a6e33526131da7d19a2c", "KuCoin", "hot_wallet"),
+        ("0x689c56aef474df92d44a1b70850f808488f9769c", "KuCoin", "hot_wallet"),
+        ("0x4982085c9e2f89f2ecb8131eca71afad896e89cb", "MEXC", "hot_wallet"),
+        ("0x97b9d2aa81164948c17c1beef8e3d5f3f6c1d8c5", "Bitget", "hot_wallet"),
+        ("0x6cc5f688a315f3dc28a7781717a9a798a59fda7b", "OKX", "hot_wallet"),
+    ]
+
+    db = SessionLocal()
+    added = 0
+    try:
+        for address, name, wallet_type in EXCHANGE_HOT_WALLETS:
+            existing = db.query(ExchangeWallet).filter_by(wallet_address=address.lower()).first()
+            if not existing:
+                wallet = ExchangeWallet(
+                    wallet_address=address.lower(),
+                    exchange_name=name,
+                    wallet_type=wallet_type,
+                    chain="bsc",
+                    verified=True,
+                )
+                db.add(wallet)
+                added += 1
+        db.commit()
+    finally:
+        db.close()
+    return added
+
+
 def _run_seeder_background():
     """Run the wallet seeder in a background thread."""
     import asyncio
+    import logging
     from backend.trackers.wallet_seeder import run_wallet_seeder
-    from scripts.seed_known_wallets import seed_exchange_wallets
+    from backend.models.scan_log import ScanLog
+    from backend.database import SessionLocal
+    from datetime import datetime
 
-    seed_exchange_wallets()
-    asyncio.run(run_wallet_seeder())
+    logger = logging.getLogger(__name__)
+    started = datetime.utcnow()
+
+    try:
+        logger.info("Seeder: Starting exchange wallet seeding...")
+        exchange_count = _seed_exchange_wallets()
+        logger.info(f"Seeder: Added {exchange_count} exchange wallets")
+
+        logger.info("Seeder: Starting known wallet extraction from confirmed pumps...")
+        asyncio.run(run_wallet_seeder())
+
+        finished = datetime.utcnow()
+        # Log success
+        db = SessionLocal()
+        try:
+            from backend.models.known_wallet import KnownWallet
+            total_wallets = db.query(KnownWallet).count()
+            entry = ScanLog(
+                job_name="wallet_seeder",
+                status="success",
+                tokens_checked=5,
+                tokens_flagged=total_wallets,
+                details=f"Seeded {exchange_count} exchange wallets. Extracted {total_wallets} known wallets from RAVE, SIREN, RIVER, ARIA, STO.",
+                started_at=started,
+                finished_at=finished,
+                duration_seconds=int((finished - started).total_seconds()),
+            )
+            db.add(entry)
+            db.commit()
+        finally:
+            db.close()
+        logger.info(f"Seeder: Complete. {total_wallets} known wallets in database.")
+
+    except Exception as e:
+        logger.error(f"Seeder failed: {e}")
+        # Log error
+        db = SessionLocal()
+        try:
+            entry = ScanLog(
+                job_name="wallet_seeder",
+                status="error",
+                error_message=str(e),
+                started_at=started,
+                finished_at=datetime.utcnow(),
+            )
+            db.add(entry)
+            db.commit()
+        finally:
+            db.close()
 
 
 @router.post("/seed-wallets")

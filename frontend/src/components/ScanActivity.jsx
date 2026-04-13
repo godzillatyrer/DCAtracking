@@ -19,6 +19,7 @@ const JOB_LABELS = {
   wallet_tracker: { label: 'Wallet Tracker', icon: '~30m', desc: 'Follows known operator wallets for new activity' },
   scorer: { label: 'Score Calculator', icon: '~30m', desc: 'Recalculates 0-100 scores for all active tokens' },
   cleanup: { label: 'Cleanup', icon: '~24h', desc: 'Expires old flagged tokens not seen in 7+ days' },
+  wallet_seeder: { label: 'Wallet Seeder', icon: 'manual', desc: 'Extracts known wallets from confirmed pump tokens (RAVE, SIREN, RIVER, ARIA, STO)' },
 };
 
 function statusBadge(status) {
