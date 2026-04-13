@@ -109,14 +109,15 @@ async def _get_contract_creation(contract_address: str) -> dict | None:
 
 
 async def _get_token_holders(contract_address: str, page: int, offset: int) -> dict | None:
-    """Get token holders via nr_getTokenHolders20."""
+    """
+    Get token holders. Tries nr_getTokenHolders20 first, falls back to
+    reconstructing holders from Transfer event logs if enhanced API unavailable.
+    """
+    # Try enhanced API first
     page_size = str(offset) if offset else "10"
-    # pageKey: use empty string for first page, subsequent pages need pagination
-    # For simplicity, we map page numbers to sequential calls
     page_key = ""
     holders_all = []
 
-    # Fetch enough pages to reach the requested page
     for _ in range(page):
         result = await _rpc_call("nr_getTokenHolders20", [
             contract_address.lower(), page_key, page_size
@@ -137,6 +138,90 @@ async def _get_token_holders(contract_address: str, page: int, offset: int) -> d
             "TokenHolderQuantity": str(balance),
         })
 
+    if transformed:
+        return _etherscan_response(transformed)
+
+    # FALLBACK: Reconstruct holders from Transfer event logs
+    logger.info(f"nr_getTokenHolders20 unavailable, reconstructing from transfers for {contract_address[:10]}...")
+    return await _reconstruct_holders_from_logs(contract_address, page, offset)
+
+
+async def _reconstruct_holders_from_logs(
+    contract_address: str, page: int, offset: int
+) -> dict | None:
+    """
+    Reconstruct top holders by replaying Transfer events from eth_getLogs.
+    Computes net balances per wallet from all transfers.
+    """
+    from collections import defaultdict
+    from decimal import Decimal
+
+    # Known addresses to exclude (routers, burn addresses, exchanges)
+    EXCLUDED = {
+        "0x" + "0" * 40,
+        "0x" + "0" * 39 + "dead",
+        "0x000000000000000000000000000000000000dead",
+        "0x10ed43c718714eb63d5aa57b78b54704e256024e",  # PancakeSwap v2
+        "0x13f4ea83d0bd40e75c8222255bc855a974568dd4",  # PancakeSwap v3
+    }
+
+    balances: dict[str, int] = defaultdict(int)
+
+    # Fetch Transfer logs in chunks (eth_getLogs may limit response size)
+    # Get latest block to create ranges
+    latest_block = await _rpc_call("eth_blockNumber", [])
+    if not latest_block:
+        return _etherscan_response([])
+
+    latest = _hex_to_int(latest_block)
+
+    # Scan in chunks of 50000 blocks from the end (most recent activity matters most)
+    # For tokens < 50k blocks old, this gets everything
+    chunk_size = 50000
+    start_block = max(0, latest - chunk_size * 5)  # Last ~250k blocks
+
+    for from_block in range(start_block, latest, chunk_size):
+        to_block = min(from_block + chunk_size - 1, latest)
+        logs = await _rpc_call("eth_getLogs", [{
+            "address": contract_address.lower(),
+            "topics": [TRANSFER_TOPIC],
+            "fromBlock": hex(from_block),
+            "toBlock": hex(to_block),
+        }])
+
+        if not logs:
+            continue
+
+        for log in logs:
+            topics = log.get("topics", [])
+            if len(topics) < 3:
+                continue
+            from_addr = _unpad_address(topics[1])
+            to_addr = _unpad_address(topics[2])
+            amount = _hex_to_int(log.get("data", "0x0"))
+
+            balances[from_addr] -= amount
+            balances[to_addr] += amount
+
+    # Sort by balance, exclude zero/negative and infrastructure
+    sorted_holders = sorted(
+        [(addr, bal) for addr, bal in balances.items()
+         if bal > 0 and addr not in EXCLUDED],
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    # Paginate
+    start = (page - 1) * offset
+    end = start + offset
+    page_holders = sorted_holders[start:end]
+
+    transformed = [
+        {"TokenHolderAddress": addr, "TokenHolderQuantity": str(bal)}
+        for addr, bal in page_holders
+    ]
+
+    logger.info(f"Reconstructed {len(sorted_holders)} holders from logs, returning {len(transformed)}")
     return _etherscan_response(transformed)
 
 
