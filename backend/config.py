@@ -9,9 +9,10 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://scanner:password@localhost:5432/pump_scanner"
 
-    # BscScan (V2 API — api.etherscan.io with chainid=56 for BSC)
+    # BscScan (V2 API — api.etherscan.io/v2/api with chainid=56 for BSC)
     BSCSCAN_API_KEY: str = ""
-    BSCSCAN_BASE_URL: str = "https://api.etherscan.io/v2/api?chainid=56"
+    BSCSCAN_BASE_URL: str = "https://api.etherscan.io/v2/api"
+    BSCSCAN_CHAIN_ID: int = 56
 
     # Anthropic Claude API
     ANTHROPIC_API_KEY: str = ""

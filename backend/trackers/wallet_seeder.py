@@ -10,24 +10,18 @@ Uses two strategies to find top holders:
   2. Fallback: reconstruct holders from tokentx transfer history (always free)
 """
 
-import asyncio
 import logging
 from datetime import datetime
 from collections import defaultdict
 from decimal import Decimal
 
-import httpx
 from sqlalchemy.orm import Session
 
-from backend.config import settings
 from backend.database import SessionLocal
+from backend.bscscan_client import bscscan_request
 from backend.models.known_wallet import KnownWallet
 
 logger = logging.getLogger(__name__)
-
-BSCSCAN_BASE = settings.BSCSCAN_BASE_URL
-API_KEY = settings.BSCSCAN_API_KEY
-RATE_LIMIT_DELAY = 0.25
 
 # Confirmed pump tokens with contract addresses
 CONFIRMED_PUMPS = [
@@ -71,22 +65,6 @@ EXCLUDED_ADDRESSES = {
     "0xf977814e90da44bfa03b6295a0616a897441acec",  # Binance Hot Wallet 3
     "0x28c6c06298d514db089934071355e5743bf21d60",  # Binance Hot Wallet 4
 }
-
-
-async def bscscan_request(params: dict) -> dict | None:
-    """Make a rate-limited request to BscScan API."""
-    params["apikey"] = API_KEY
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await client.get(BSCSCAN_BASE, params=params)
-            await asyncio.sleep(RATE_LIMIT_DELAY)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("status") == "1":
-                    return data
-        except Exception as e:
-            logger.error(f"BscScan API error: {e}")
-    return None
 
 
 async def get_deployer(contract_address: str) -> str | None:

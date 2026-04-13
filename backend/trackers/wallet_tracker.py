@@ -11,42 +11,20 @@ Follows known insider wallets to detect their next play:
 Runs every 30-60 minutes.
 """
 
-import asyncio
 import logging
 from datetime import datetime
 from decimal import Decimal
 
-import httpx
 from sqlalchemy.orm import Session
 
-from backend.config import settings
 from backend.database import SessionLocal
+from backend.bscscan_client import bscscan_request
 from backend.models.flagged_token import FlaggedToken
 from backend.models.known_wallet import KnownWallet
 from backend.models.wallet_activity import WalletActivity
 from backend.models.exchange_wallet import ExchangeWallet
 
 logger = logging.getLogger(__name__)
-
-BSCSCAN_BASE = settings.BSCSCAN_BASE_URL
-API_KEY = settings.BSCSCAN_API_KEY
-RATE_LIMIT_DELAY = 0.25
-
-
-async def bscscan_request(params: dict) -> dict | None:
-    """Make a rate-limited request to BscScan API."""
-    params["apikey"] = API_KEY
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await client.get(BSCSCAN_BASE, params=params)
-            await asyncio.sleep(RATE_LIMIT_DELAY)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("status") == "1":
-                    return data
-        except Exception as e:
-            logger.error(f"BscScan API error: {e}")
-    return None
 
 
 async def get_recent_token_transfers(wallet_address: str) -> list[dict]:
