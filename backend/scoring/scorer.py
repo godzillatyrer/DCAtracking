@@ -202,6 +202,10 @@ def score_token(db: Session, contract_address: str) -> tuple[int, dict]:
     if not flagged:
         return 0, {}
 
+    # Don't score tokens with no actual data — they're stubs from auto-flagging
+    if not flagged.token_name and not flagged.token_symbol and not flagged.price_usd:
+        return 0, {}
+
     profile = db.query(TokenProfile).filter_by(contract_address=contract_address).first()
     watchlist = db.query(Watchlist).filter_by(contract_address=contract_address).first()
 

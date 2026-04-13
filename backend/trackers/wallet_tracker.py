@@ -228,7 +228,9 @@ async def track_wallet(
 def auto_flag_new_token(db: Session, token_contract: str, detected_via: str):
     """
     Automatically flag a token discovered through wallet tracking.
-    If a known operator is accumulating, this is a high-priority signal.
+    Only creates a bare entry — the volume scanner and profile checker
+    will enrich it with actual data on their next runs.
+    Does NOT promote to candidate until data is available.
     """
     existing = db.query(FlaggedToken).filter_by(contract_address=token_contract).first()
     if not existing:
@@ -237,7 +239,7 @@ def auto_flag_new_token(db: Session, token_contract: str, detected_via: str):
             chain="bsc",
             first_flagged_at=datetime.utcnow(),
             last_seen_at=datetime.utcnow(),
-            status="candidate",  # Skip raw, go straight to candidate
+            status="raw",  # Stay raw until profile checker enriches with actual data
         )
         db.add(flagged)
         db.commit()

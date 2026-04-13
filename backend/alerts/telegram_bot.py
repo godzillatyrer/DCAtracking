@@ -130,6 +130,15 @@ async def fire_score_alert(
         if not flagged:
             return
 
+        # Don't fire alerts for tokens with no actual data (auto-flagged stubs)
+        if not flagged.token_name and not flagged.token_symbol:
+            logger.info(f"Skipping alert for {contract_address[:10]} — no token data yet")
+            return
+
+        if not flagged.price_usd and not flagged.volume_24h:
+            logger.info(f"Skipping alert for {flagged.token_symbol or contract_address[:10]} — no price/volume data")
+            return
+
         watchlist = db.query(Watchlist).filter_by(contract_address=contract_address).first()
         if watchlist and watchlist.alert_fired:
             logger.info(f"Alert already fired for {flagged.token_symbol} — skipping")
