@@ -48,7 +48,7 @@ CONFIRMED_PUMPS = [
     {
         "symbol": "STO",
         "name": "StakeStone",
-        "contract": "",  # To be looked up on BscScan
+        "contract": "0xdaf1695c41327b61b9b9965ac6a5843a3198cf07",
     },
 ]
 
