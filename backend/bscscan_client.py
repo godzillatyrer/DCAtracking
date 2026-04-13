@@ -172,9 +172,9 @@ async def _reconstruct_holders_from_logs(
 
     latest = _hex_to_int(latest_block)
 
-    # Scan last ~30k blocks in chunks of 5000 (keeps memory low)
-    chunk_size = 5000
-    start_block = max(0, latest - 30000)
+    # Scan last ~200k blocks in chunks of 10000 (~2.5 days on BSC)
+    chunk_size = 10000
+    start_block = max(0, latest - 200000)
     total_logs = 0
 
     for from_block in range(start_block, latest, chunk_size):

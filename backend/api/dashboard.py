@@ -475,4 +475,41 @@ async def run_diagnostics():
         "telegram_chat_set": bool(settings.TELEGRAM_CHAT_ID),
     }
 
+    # 5. Test RAVE token specifically
+    try:
+        from backend.bscscan_client import _rpc_call, _hex_to_int
+        RAVE_CONTRACT = "0x17205fab260a7a6383a81452ce6315a39370db97"
+        TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+        latest_block = await _rpc_call("eth_blockNumber", [])
+        latest = _hex_to_int(latest_block) if latest_block else 0
+
+        # Check last 10k blocks for RAVE transfers
+        rave_logs = await _rpc_call("eth_getLogs", [{
+            "address": RAVE_CONTRACT,
+            "topics": [TRANSFER_TOPIC],
+            "fromBlock": hex(max(0, latest - 10000)),
+            "toBlock": "latest",
+        }])
+
+        # Also check with checksummed address
+        rave_logs_upper = await _rpc_call("eth_getLogs", [{
+            "address": "0x17205FAB260A7A6383A81452ce6315A39370dB97",
+            "topics": [TRANSFER_TOPIC],
+            "fromBlock": hex(max(0, latest - 10000)),
+            "toBlock": "latest",
+        }])
+
+        results["rave_test"] = {
+            "contract": RAVE_CONTRACT,
+            "latest_block": latest,
+            "scan_from_block": max(0, latest - 10000),
+            "logs_lowercase": len(rave_logs) if rave_logs else 0,
+            "logs_checksummed": len(rave_logs_upper) if rave_logs_upper else 0,
+            "raw_response_lowercase": str(rave_logs)[:300] if rave_logs else "empty/null",
+            "raw_response_checksummed": str(rave_logs_upper)[:300] if rave_logs_upper else "empty/null",
+        }
+    except Exception as e:
+        results["rave_test"] = {"error": str(e)}
+
     return results
