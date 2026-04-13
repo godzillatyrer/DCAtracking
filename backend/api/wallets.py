@@ -198,6 +198,29 @@ def add_wallet(request: AddWalletRequest, db: Session = Depends(get_db)):
     return {"status": "added", "wallet_address": address}
 
 
+@router.get("/{address}/arkham")
+async def lookup_wallet_arkham(address: str):
+    """Look up a wallet on Arkham Intelligence — shows who owns it."""
+    from backend.arkham_client import lookup_address
+    from backend.config import settings
+
+    if not settings.ARKHAM_API_KEY:
+        return {"status": "not_configured", "message": "ARKHAM_API_KEY not set"}
+
+    entity = await lookup_address(address)
+    if entity:
+        return {
+            "status": "found",
+            "address": address.lower(),
+            "entity": entity,
+        }
+    return {
+        "status": "unknown",
+        "address": address.lower(),
+        "message": "Address not labeled by Arkham",
+    }
+
+
 @router.get("/balances")
 async def get_wallet_balances(
     page: int = Query(1, ge=1),
