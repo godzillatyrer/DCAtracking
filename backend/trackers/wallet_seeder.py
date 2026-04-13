@@ -185,7 +185,10 @@ async def seed_wallets_for_token(
 ) -> int:
     """
     Seed known wallets for a single confirmed pump token.
-    Returns number of wallets added.
+    Uses token Transfer events to detect:
+    - Deployer (first mint recipient)
+    - Top holders (by balance from transfer reconstruction)
+    - Clusters (multiple wallets receiving tokens from the same distributor)
     """
     contract = token_info["contract"]
     symbol = token_info["symbol"]
@@ -196,7 +199,7 @@ async def seed_wallets_for_token(
 
     added = 0
 
-    # 1. Get deployer
+    # 1. Get deployer (first mint recipient)
     deployer = await get_deployer(contract)
     if deployer:
         existing = db.query(KnownWallet).filter_by(wallet_address=deployer).first()
@@ -213,26 +216,35 @@ async def seed_wallets_for_token(
             db.add(wallet)
             added += 1
             logger.info(f"Added deployer for {symbol}: {deployer}")
+        else:
+            # Update role if already exists as accumulator
+            if existing.role == "accumulator":
+                existing.role = "deployer"
+                existing.label = f"{symbol} deployer"
 
-    # 2. Get top holders — try API first, fallback to transfer reconstruction
+    # 2. Get top holders
     holders = await get_top_holders(contract, count=50)
     if not holders:
         logger.info(f"tokenholderlist unavailable for {symbol}, reconstructing from transfers...")
         holders = await reconstruct_holders_from_transfers(contract)
     logger.info(f"Found {len(holders)} holders for {symbol}")
 
-    # 3. Trace funding sources for cluster detection
-    funding_map: dict[str, list[str]] = defaultdict(list)
+    # 3. Analyze token transfer patterns for cluster detection
+    # Instead of tracing gas funding (requires txlist), we look at
+    # who SENT tokens to each holder — if one address distributed
+    # tokens to many holders, those holders form a cluster.
+    distribution_map: dict[str, list[str]] = defaultdict(list)
 
     for holder in holders:
         holder_addr = holder.get("TokenHolderAddress", "").lower()
         if not holder_addr or holder_addr in EXCLUDED_ADDRESSES:
             continue
 
-        # Trace funding source
-        funder = await get_funding_source(holder_addr)
-        if funder:
-            funding_map[funder].append(holder_addr)
+        # Get incoming token transfers for this holder
+        token_source = await get_token_source(contract, holder_addr)
+
+        if token_source:
+            distribution_map[token_source].append(holder_addr)
 
         # Add as known wallet
         existing = db.query(KnownWallet).filter_by(wallet_address=holder_addr).first()
@@ -243,43 +255,72 @@ async def seed_wallets_for_token(
                 associated_token=symbol,
                 associated_contract=contract,
                 role="accumulator",
-                funding_source=funder,
+                funding_source=token_source,
                 is_active=True,
                 added_at=datetime.utcnow(),
             )
             db.add(wallet)
             added += 1
 
-    # 4. Identify cluster members (shared funding source)
-    for funder, funded_wallets in funding_map.items():
-        if len(funded_wallets) >= 3:
+    # 4. Identify clusters — wallets that received tokens from the same distributor
+    for distributor, recipients in distribution_map.items():
+        if len(recipients) >= 3 and distributor not in EXCLUDED_ADDRESSES:
             logger.warning(
-                f"CLUSTER DETECTED for {symbol}: {funder} funded {len(funded_wallets)} wallets"
+                f"CLUSTER DETECTED for {symbol}: {distributor} distributed to {len(recipients)} wallets"
             )
-            for addr in funded_wallets:
+            for addr in recipients:
                 wallet = db.query(KnownWallet).filter_by(wallet_address=addr).first()
                 if wallet:
                     wallet.role = "cluster_member"
-                    wallet.notes = f"Cluster funded by {funder}"
+                    wallet.notes = f"Received {symbol} from distributor {distributor}"
 
-            # Also add the funder itself as a known wallet
-            existing = db.query(KnownWallet).filter_by(wallet_address=funder).first()
-            if not existing and funder not in EXCLUDED_ADDRESSES:
+            # Add the distributor itself
+            existing = db.query(KnownWallet).filter_by(wallet_address=distributor).first()
+            if not existing:
                 wallet = KnownWallet(
-                    wallet_address=funder,
-                    label=f"{symbol} cluster funder ({len(funded_wallets)} wallets)",
+                    wallet_address=distributor,
+                    label=f"{symbol} distributor ({len(recipients)} recipients)",
                     associated_token=symbol,
                     associated_contract=contract,
                     role="distributor",
                     is_active=True,
                     added_at=datetime.utcnow(),
-                    notes=f"Funded wallets: {', '.join(w[:10] for w in funded_wallets)}",
+                    notes=f"Distributed to: {', '.join(r[:10] for r in recipients)}",
                 )
                 db.add(wallet)
                 added += 1
+            else:
+                if existing.role == "accumulator":
+                    existing.role = "distributor"
+                    existing.label = f"{symbol} distributor ({len(recipients)} recipients)"
 
     db.commit()
     return added
+
+
+async def get_token_source(contract_address: str, holder_address: str) -> str | None:
+    """
+    Find who sent the most tokens to a holder for a specific token.
+    Uses eth_getLogs Transfer events where 'to' = holder.
+    """
+    data = await bscscan_request({
+        "module": "account",
+        "action": "tokentx",
+        "address": holder_address,
+        "contractaddress": contract_address,
+        "page": "1",
+        "offset": "10",
+        "sort": "asc",
+    })
+    if data and isinstance(data.get("result"), list):
+        holder_lower = holder_address.lower()
+        # Find the first sender who transferred tokens TO this holder
+        for tx in data["result"]:
+            to_addr = tx.get("to", "").lower()
+            from_addr = tx.get("from", "").lower()
+            if to_addr == holder_lower and from_addr not in EXCLUDED_ADDRESSES:
+                return from_addr
+    return None
 
 
 async def run_wallet_seeder():
