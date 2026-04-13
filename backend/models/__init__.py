@@ -6,6 +6,7 @@ from backend.models.wallet_activity import WalletActivity
 from backend.models.alert import Alert
 from backend.models.token_score_history import TokenScoreHistory
 from backend.models.exchange_wallet import ExchangeWallet
+from backend.models.scan_log import ScanLog
 
 __all__ = [
     "FlaggedToken",
@@ -16,4 +17,5 @@ __all__ = [
     "Alert",
     "TokenScoreHistory",
     "ExchangeWallet",
+    "ScanLog",
 ]

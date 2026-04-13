@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.database import Base
 from backend.models import (  # noqa: F401 — ensure all models are registered
     FlaggedToken, TokenProfile, Watchlist, KnownWallet,
-    WalletActivity, Alert, TokenScoreHistory, ExchangeWallet,
+    WalletActivity, Alert, TokenScoreHistory, ExchangeWallet, ScanLog,
 )
 
 config = context.config

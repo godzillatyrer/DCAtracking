@@ -1,8 +1,9 @@
 """
-Dashboard API routes — summary stats and main scanner views.
+Dashboard API routes — summary stats, main scanner views, and activity logs.
 """
 
-from fastapi import APIRouter, Depends, Query
+import asyncio
+from fastapi import APIRouter, Depends, Query, BackgroundTasks
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
@@ -11,6 +12,7 @@ from backend.models.flagged_token import FlaggedToken
 from backend.models.watchlist import Watchlist
 from backend.models.alert import Alert
 from backend.models.known_wallet import KnownWallet
+from backend.models.scan_log import ScanLog
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -207,4 +209,99 @@ def get_stats(db: Session = Depends(get_db)):
         "win_rate": round(len(wins) / total_reviewed * 100, 1) if total_reviewed else 0,
         "avg_peak_gain_pct": round(avg_peak_gain, 1),
         "avg_lead_time_hours": round(avg_lead_time, 1),
+    }
+
+
+@router.get("/scan-logs")
+def get_scan_logs(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    job_name: str | None = None,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Activity log of every scanner run — see exactly what the bot checked."""
+    query = db.query(ScanLog)
+    if job_name:
+        query = query.filter(ScanLog.job_name == job_name)
+    if status:
+        query = query.filter(ScanLog.status == status)
+
+    total = query.count()
+    logs = query.order_by(ScanLog.started_at.desc()).offset(
+        (page - 1) * per_page
+    ).limit(per_page).all()
+
+    return {
+        "items": [
+            {
+                "id": l.id,
+                "job_name": l.job_name,
+                "status": l.status,
+                "tokens_checked": l.tokens_checked,
+                "tokens_flagged": l.tokens_flagged,
+                "details": l.details,
+                "error_message": l.error_message,
+                "started_at": l.started_at.isoformat() if l.started_at else None,
+                "finished_at": l.finished_at.isoformat() if l.finished_at else None,
+                "duration_seconds": l.duration_seconds,
+            }
+            for l in logs
+        ],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
+
+
+@router.get("/scan-logs/summary")
+def get_scan_log_summary(db: Session = Depends(get_db)):
+    """Per-job summary: last run time, last status, total runs, error count."""
+    jobs = [
+        "volume_scanner", "profile_checker", "wallet_analyzer",
+        "exchange_flow", "social_scanner", "wallet_tracker", "scorer", "cleanup",
+    ]
+    summary = []
+    for job in jobs:
+        total = db.query(func.count(ScanLog.id)).filter(ScanLog.job_name == job).scalar()
+        errors = db.query(func.count(ScanLog.id)).filter(
+            ScanLog.job_name == job, ScanLog.status == "error"
+        ).scalar()
+        last = db.query(ScanLog).filter(ScanLog.job_name == job).order_by(
+            ScanLog.started_at.desc()
+        ).first()
+
+        summary.append({
+            "job_name": job,
+            "total_runs": total,
+            "errors": errors,
+            "last_status": last.status if last else "never_run",
+            "last_run": last.started_at.isoformat() if last and last.started_at else None,
+            "last_details": last.details if last else None,
+            "last_duration_seconds": last.duration_seconds if last else None,
+        })
+
+    return summary
+
+
+def _run_seeder_background():
+    """Run the wallet seeder in a background thread."""
+    import asyncio
+    from backend.trackers.wallet_seeder import run_wallet_seeder
+    from scripts.seed_known_wallets import seed_exchange_wallets
+
+    seed_exchange_wallets()
+    asyncio.run(run_wallet_seeder())
+
+
+@router.post("/seed-wallets")
+def trigger_wallet_seed(background_tasks: BackgroundTasks):
+    """
+    Trigger the wallet seeder to extract known wallets from the 5 confirmed
+    pump tokens. Runs in the background — check scan logs for progress.
+    """
+    background_tasks.add_task(_run_seeder_background)
+    return {
+        "status": "started",
+        "message": "Wallet seeder started in background. This will take 5-10 minutes. Check the Wallet Tracker page for results.",
     }
