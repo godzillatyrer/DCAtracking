@@ -28,6 +28,7 @@ const tdStyle = {
 function WalletTracker() {
   const { data: wallets, refetch: refetchWallets } = useApi('/wallets/known?per_page=100', { refreshInterval: 60000 });
   const { data: newAccum } = useApi('/wallets/new-accumulations?limit=20', { refreshInterval: 30000 });
+  const { data: balances } = useApi('/wallets/balances?per_page=100', { refreshInterval: 120000 });
   const [selectedWallet, setSelectedWallet] = useState(null);
   const { data: activity } = useApi(
     `/wallets/${selectedWallet}/activity?per_page=50&flagged_only=true`,
@@ -104,12 +105,16 @@ function WalletTracker() {
                 <th style={thStyle}>Address</th>
                 <th style={thStyle}>Token</th>
                 <th style={thStyle}>Role</th>
+                <th style={thStyle}>Tokens Held</th>
+                <th style={thStyle}>BNB Balance</th>
                 <th style={thStyle}>Funding</th>
                 <th style={thStyle}>Added</th>
               </tr>
             </thead>
             <tbody>
-              {(wallets?.items || []).map((w, i) => (
+              {(wallets?.items || []).map((w, i) => {
+                const bnb = balances ? balances[w.wallet_address] : null;
+                return (
                 <tr
                   key={i}
                   onClick={() => setSelectedWallet(w.wallet_address)}
@@ -124,15 +129,31 @@ function WalletTracker() {
                   <td style={tdStyle}>
                     <span style={{
                       color: w.role === 'deployer' ? '#ff4444' :
+                             w.role === 'distributor' ? '#ff8800' :
                              w.role === 'cluster_member' ? '#ffaa00' : '#888',
                     }}>
                       {w.role || '-'}
                     </span>
                   </td>
+                  <td style={tdStyle}>
+                    <span style={{ color: w.token_count > 0 ? '#44aaff' : '#444' }}>
+                      {w.token_count || 0}
+                    </span>
+                  </td>
+                  <td style={tdStyle}>
+                    {bnb !== null && bnb !== undefined ? (
+                      <span style={{ color: bnb > 1 ? '#44ff44' : bnb > 0 ? '#888' : '#444' }}>
+                        {bnb.toFixed(4)} BNB
+                      </span>
+                    ) : (
+                      <span style={{ color: '#333' }}>...</span>
+                    )}
+                  </td>
                   <td style={{ ...tdStyle, fontSize: '12px' }}>{shortAddress(w.funding_source)}</td>
                   <td style={tdStyle}>{formatDate(w.added_at)}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
