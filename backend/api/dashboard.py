@@ -398,3 +398,74 @@ def trigger_wallet_seed(background_tasks: BackgroundTasks):
         "status": "started",
         "message": "Wallet seeder started in background. This will take 5-10 minutes. Check the Wallet Tracker page for results.",
     }
+
+
+@router.get("/diagnostics")
+async def run_diagnostics():
+    """Test API connectivity — checks BscScan, DEX Screener, and database."""
+    import httpx
+    from backend.config import settings
+    from backend.database import SessionLocal
+    from backend.models.known_wallet import KnownWallet
+    from backend.models.exchange_wallet import ExchangeWallet
+    from backend.models.flagged_token import FlaggedToken
+
+    results = {}
+
+    # 1. Check BscScan API
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Test with a simple call — get RAVE deployer
+            resp = await client.get(settings.BSCSCAN_BASE_URL, params={
+                "module": "contract",
+                "action": "getcontractcreation",
+                "contractaddresses": "0x17205fab260a7a6383a81452ce6315a39370db97",
+                "apikey": settings.BSCSCAN_API_KEY,
+            })
+            data = resp.json()
+            results["bscscan"] = {
+                "status": "ok" if data.get("status") == "1" else "error",
+                "api_key_set": bool(settings.BSCSCAN_API_KEY),
+                "api_key_preview": settings.BSCSCAN_API_KEY[:8] + "..." if settings.BSCSCAN_API_KEY else "NOT SET",
+                "response_status": data.get("status"),
+                "response_message": data.get("message"),
+                "result_preview": str(data.get("result", ""))[:200],
+            }
+    except Exception as e:
+        results["bscscan"] = {"status": "error", "error": str(e)}
+
+    # 2. Check DEX Screener API
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"{settings.DEXSCREENER_BASE_URL}/token-boosts/top/v1")
+            results["dexscreener"] = {
+                "status": "ok" if resp.status_code == 200 else "error",
+                "http_code": resp.status_code,
+                "tokens_returned": len(resp.json()) if resp.status_code == 200 and isinstance(resp.json(), list) else 0,
+            }
+    except Exception as e:
+        results["dexscreener"] = {"status": "error", "error": str(e)}
+
+    # 3. Check database state
+    db = SessionLocal()
+    try:
+        results["database"] = {
+            "status": "ok",
+            "known_wallets": db.query(KnownWallet).count(),
+            "exchange_wallets": db.query(ExchangeWallet).count(),
+            "flagged_tokens": db.query(FlaggedToken).count(),
+        }
+    except Exception as e:
+        results["database"] = {"status": "error", "error": str(e)}
+    finally:
+        db.close()
+
+    # 4. Config check
+    results["config"] = {
+        "bscscan_key_set": bool(settings.BSCSCAN_API_KEY),
+        "anthropic_key_set": bool(settings.ANTHROPIC_API_KEY),
+        "telegram_bot_set": bool(settings.TELEGRAM_BOT_TOKEN),
+        "telegram_chat_set": bool(settings.TELEGRAM_CHAT_ID),
+    }
+
+    return results
