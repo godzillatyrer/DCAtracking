@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # Scoring thresholds
     ALERT_THRESHOLD: int = 70
     WATCHLIST_THRESHOLD: int = 50
+    MAX_ALERTS_PER_DAY: int = 5
 
     # Scanner intervals (minutes)
     VOLUME_SCAN_INTERVAL: int = 15

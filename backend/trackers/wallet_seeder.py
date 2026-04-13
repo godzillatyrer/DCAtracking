@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from backend.database import SessionLocal
 from backend.bscscan_client import bscscan_request
+from backend.arkham_client import lookup_address, is_exchange_or_infrastructure
 from backend.models.known_wallet import KnownWallet
 
 logger = logging.getLogger(__name__)
@@ -216,18 +217,36 @@ async def seed_wallets_for_token(
         if not holder_addr or holder_addr in EXCLUDED_ADDRESSES:
             continue
 
+        # Arkham lookup — identify who this wallet belongs to
+        arkham_entity = await lookup_address(holder_addr)
+        if arkham_entity:
+            entity_name = arkham_entity.get("name", "")
+            entity_type = arkham_entity.get("type", "")
+            logger.info(f"  Arkham: {holder_addr[:10]}... = {entity_name} ({entity_type})")
+
+            # Skip exchanges and infrastructure — they're not insiders
+            if is_exchange_or_infrastructure(arkham_entity):
+                logger.info(f"  Skipping {entity_name} — exchange/infrastructure")
+                continue
+
         # Get incoming token transfers for this holder
         token_source = await get_token_source(contract, holder_addr)
 
         if token_source:
             distribution_map[token_source].append(holder_addr)
 
+        # Build label — use Arkham entity name if available
+        if arkham_entity and arkham_entity.get("name"):
+            label = f"{symbol} holder — {arkham_entity['name']}"
+        else:
+            label = f"{symbol} top holder"
+
         # Add as known wallet
         existing = db.query(KnownWallet).filter_by(wallet_address=holder_addr).first()
         if not existing:
             wallet = KnownWallet(
                 wallet_address=holder_addr,
-                label=f"{symbol} top holder",
+                label=label,
                 associated_token=symbol,
                 associated_contract=contract,
                 role="accumulator",
@@ -237,6 +256,10 @@ async def seed_wallets_for_token(
             )
             db.add(wallet)
             added += 1
+        elif arkham_entity and arkham_entity.get("name"):
+            # Update existing wallet with Arkham label
+            if "top holder" in (existing.label or ""):
+                existing.label = label
 
     # 4. Identify clusters — wallets that received tokens from the same distributor
     for distributor, recipients in distribution_map.items():

@@ -473,7 +473,36 @@ async def run_diagnostics():
         "anthropic_key_set": bool(settings.ANTHROPIC_API_KEY),
         "telegram_bot_set": bool(settings.TELEGRAM_BOT_TOKEN),
         "telegram_chat_set": bool(settings.TELEGRAM_CHAT_ID),
+        "arkham_key_set": bool(settings.ARKHAM_API_KEY),
     }
+
+    # 5. Check Arkham API
+    if settings.ARKHAM_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                # Test with a known address lookup
+                resp = await client.get(
+                    f"{settings.ARKHAM_BASE_URL}/intelligence/address/0x28c6c06298d514db089934071355e5743bf21d60",
+                    headers={"API-Key": settings.ARKHAM_API_KEY},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    results["arkham"] = {
+                        "status": "ok",
+                        "http_code": resp.status_code,
+                        "entity_found": bool(data.get("arkhamEntity") or data.get("entity")),
+                        "response_preview": str(data)[:300],
+                    }
+                else:
+                    results["arkham"] = {
+                        "status": "error",
+                        "http_code": resp.status_code,
+                        "response": resp.text[:300],
+                    }
+        except Exception as e:
+            results["arkham"] = {"status": "error", "error": str(e)}
+    else:
+        results["arkham"] = {"status": "not_configured"}
 
     # 5. Test RAVE token specifically
     try:
