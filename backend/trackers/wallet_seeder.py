@@ -244,22 +244,27 @@ async def seed_wallets_for_token(
         # Add as known wallet
         existing = db.query(KnownWallet).filter_by(wallet_address=holder_addr).first()
         if not existing:
-            wallet = KnownWallet(
-                wallet_address=holder_addr,
-                label=label,
-                associated_token=symbol,
-                associated_contract=contract,
-                role="accumulator",
-                funding_source=token_source,
-                is_active=True,
-                added_at=datetime.utcnow(),
-            )
-            db.add(wallet)
-            added += 1
+            try:
+                wallet = KnownWallet(
+                    wallet_address=holder_addr,
+                    label=label,
+                    associated_token=symbol,
+                    associated_contract=contract,
+                    role="accumulator",
+                    funding_source=token_source,
+                    is_active=True,
+                    added_at=datetime.utcnow(),
+                )
+                db.add(wallet)
+                db.flush()  # Catch duplicates immediately
+                added += 1
+            except Exception:
+                db.rollback()  # Duplicate — roll back and continue
         elif arkham_entity and arkham_entity.get("name"):
             # Update existing wallet with Arkham label
             if "top holder" in (existing.label or ""):
                 existing.label = label
+                db.flush()
 
     # 4. Identify clusters — wallets that received tokens from the same distributor
     for distributor, recipients in distribution_map.items():
@@ -276,18 +281,22 @@ async def seed_wallets_for_token(
             # Add the distributor itself
             existing = db.query(KnownWallet).filter_by(wallet_address=distributor).first()
             if not existing:
-                wallet = KnownWallet(
-                    wallet_address=distributor,
-                    label=f"{symbol} distributor ({len(recipients)} recipients)",
-                    associated_token=symbol,
-                    associated_contract=contract,
-                    role="distributor",
-                    is_active=True,
-                    added_at=datetime.utcnow(),
-                    notes=f"Distributed to: {', '.join(r[:10] for r in recipients)}",
-                )
-                db.add(wallet)
-                added += 1
+                try:
+                    wallet = KnownWallet(
+                        wallet_address=distributor,
+                        label=f"{symbol} distributor ({len(recipients)} recipients)",
+                        associated_token=symbol,
+                        associated_contract=contract,
+                        role="distributor",
+                        is_active=True,
+                        added_at=datetime.utcnow(),
+                        notes=f"Distributed to: {', '.join(r[:10] for r in recipients)}",
+                    )
+                    db.add(wallet)
+                    db.flush()
+                    added += 1
+                except Exception:
+                    db.rollback()
             else:
                 if existing.role == "accumulator":
                     existing.role = "distributor"
