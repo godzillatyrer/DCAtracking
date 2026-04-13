@@ -186,7 +186,6 @@ async def seed_wallets_for_token(
     """
     Seed known wallets for a single confirmed pump token.
     Uses token Transfer events to detect:
-    - Deployer (first mint recipient)
     - Top holders (by balance from transfer reconstruction)
     - Clusters (multiple wallets receiving tokens from the same distributor)
     """
@@ -199,30 +198,7 @@ async def seed_wallets_for_token(
 
     added = 0
 
-    # 1. Get deployer (first mint recipient)
-    deployer = await get_deployer(contract)
-    if deployer:
-        existing = db.query(KnownWallet).filter_by(wallet_address=deployer).first()
-        if not existing:
-            wallet = KnownWallet(
-                wallet_address=deployer,
-                label=f"{symbol} deployer",
-                associated_token=symbol,
-                associated_contract=contract,
-                role="deployer",
-                is_active=True,
-                added_at=datetime.utcnow(),
-            )
-            db.add(wallet)
-            added += 1
-            logger.info(f"Added deployer for {symbol}: {deployer}")
-        else:
-            # Update role if already exists as accumulator
-            if existing.role == "accumulator":
-                existing.role = "deployer"
-                existing.label = f"{symbol} deployer"
-
-    # 2. Get top holders
+    # 1. Get top holders
     holders = await get_top_holders(contract, count=50)
     if not holders:
         logger.info(f"tokenholderlist unavailable for {symbol}, reconstructing from transfers...")

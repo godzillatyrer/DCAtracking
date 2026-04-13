@@ -90,12 +90,10 @@ def _etherscan_response(result) -> dict:
 
 async def _get_contract_creation(contract_address: str) -> dict | None:
     """Find contract deployer via first mint event (Transfer from 0x0)."""
-    logs = await _rpc_call("eth_getLogs", [{
+    logs = await _chunked_get_logs({
         "address": contract_address.lower(),
         "topics": [TRANSFER_TOPIC, ZERO_ADDRESS],
-        "fromBlock": "0x0",
-        "toBlock": "latest",
-    }])
+    }, total_blocks=200000)
     if logs and len(logs) > 0:
         # The first mint recipient is often the deployer
         first_mint = logs[0]
@@ -172,8 +170,8 @@ async def _reconstruct_holders_from_logs(
 
     latest = _hex_to_int(latest_block)
 
-    # Scan last ~200k blocks in chunks of 10000 (~2.5 days on BSC)
-    chunk_size = 10000
+    # Scan last ~200k blocks in chunks of 4999 (MegaNode free tier max is 5000)
+    chunk_size = 4999
     start_block = max(0, latest - 200000)
     total_logs = 0
 
@@ -228,23 +226,38 @@ async def _reconstruct_holders_from_logs(
     return _etherscan_response(transformed)
 
 
+async def _chunked_get_logs(filter_params: dict, total_blocks: int = 10000) -> list:
+    """Fetch eth_getLogs in chunks of 4999 blocks (MegaNode free tier limit)."""
+    latest_block = await _rpc_call("eth_blockNumber", [])
+    if not latest_block:
+        return []
+
+    latest = _hex_to_int(latest_block)
+    start_block = max(0, latest - total_blocks)
+    chunk_size = 4999
+    all_logs = []
+
+    for from_block in range(start_block, latest, chunk_size):
+        to_block = min(from_block + chunk_size - 1, latest)
+        params = {**filter_params, "fromBlock": hex(from_block), "toBlock": hex(to_block)}
+        logs = await _rpc_call("eth_getLogs", [params])
+        if logs:
+            all_logs.extend(logs)
+        # Safety cap
+        if len(all_logs) > 20000:
+            break
+
+    return all_logs
+
+
 async def _get_token_transfers_by_contract(
     contract_address: str, page: int, offset: int, sort: str
 ) -> dict | None:
     """Get recent token transfers for a contract via eth_getLogs."""
-    # Only scan last 10k blocks to keep memory low
-    latest_block = await _rpc_call("eth_blockNumber", [])
-    latest = _hex_to_int(latest_block) if latest_block else 0
-    from_block = max(0, latest - 10000)
-
-    logs = await _rpc_call("eth_getLogs", [{
+    logs = await _chunked_get_logs({
         "address": contract_address.lower(),
         "topics": [TRANSFER_TOPIC],
-        "fromBlock": hex(from_block),
-        "toBlock": "latest",
-    }])
-    if logs is None:
-        return None
+    }, total_blocks=10000)
 
     # Transform logs to Etherscan tokentx format
     transfers = []
@@ -279,31 +292,18 @@ async def _get_token_transfers_by_wallet(
     """Get token transfers for a wallet address (last ~30k blocks)."""
     padded_wallet = _pad_address(wallet_address)
 
-    # Only scan recent blocks to keep memory low
-    latest_block = await _rpc_call("eth_blockNumber", [])
-    latest = _hex_to_int(latest_block) if latest_block else 0
-    from_block_hex = hex(max(0, latest - 30000))
-
     # Get transfers FROM wallet
-    from_filter = {
-        "topics": [TRANSFER_TOPIC, padded_wallet],
-        "fromBlock": from_block_hex,
-        "toBlock": "latest",
-    }
+    from_filter = {"topics": [TRANSFER_TOPIC, padded_wallet]}
     if contract_address:
         from_filter["address"] = contract_address.lower()
 
     # Get transfers TO wallet
-    to_filter = {
-        "topics": [TRANSFER_TOPIC, None, padded_wallet],
-        "fromBlock": from_block_hex,
-        "toBlock": "latest",
-    }
+    to_filter = {"topics": [TRANSFER_TOPIC, None, padded_wallet]}
     if contract_address:
         to_filter["address"] = contract_address.lower()
 
-    from_logs = await _rpc_call("eth_getLogs", [from_filter]) or []
-    to_logs = await _rpc_call("eth_getLogs", [to_filter]) or []
+    from_logs = await _chunked_get_logs(from_filter, total_blocks=30000)
+    to_logs = await _chunked_get_logs(to_filter, total_blocks=30000)
 
     all_logs = from_logs + to_logs
 
@@ -359,16 +359,11 @@ async def _get_txlist(
     nonce_int = _hex_to_int(nonce) if nonce else 0
 
     # Get token transfers involving this wallet as a proxy for activity (last ~50k blocks)
-    latest_block = await _rpc_call("eth_blockNumber", [])
-    latest = _hex_to_int(latest_block) if latest_block else 0
-    from_block_hex = hex(max(0, latest - 50000))
-
     padded = _pad_address(wallet_address)
-    to_logs = await _rpc_call("eth_getLogs", [{
-        "topics": [TRANSFER_TOPIC, None, padded],
-        "fromBlock": from_block_hex,
-        "toBlock": "latest",
-    }]) or []
+    to_logs = await _chunked_get_logs(
+        {"topics": [TRANSFER_TOPIC, None, padded]},
+        total_blocks=50000,
+    )
 
     # Transform: create pseudo-txlist entries from token transfers
     # The first incoming transfer's sender is often the funding source
