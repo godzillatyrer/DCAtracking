@@ -1,11 +1,14 @@
+# Single-service deployment: API + dashboard + background scanner in one process.
+# Only needs 1 web service + 1 database on Render.
+
 databases:
   - name: pump-scanner-db
-    plan: starter
+    plan: basic-256mb
     databaseName: pump_scanner
     user: scanner
 
 services:
-  # FastAPI Web Service (serves API + React frontend)
+  # Single web service — serves API, React dashboard, and runs scanner jobs in-process
   - type: web
     name: pump-scanner-web
     runtime: python
@@ -30,26 +33,3 @@ services:
       - key: ARKHAM_API_KEY
         sync: false
     healthCheckPath: /api/health
-
-  # Background Worker (runs all scanners)
-  - type: worker
-    name: pump-scanner-worker
-    runtime: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: python worker.py
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: pump-scanner-db
-          property: connectionString
-      - key: BSCSCAN_API_KEY
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_CHAT_ID
-        sync: false
-      - key: ARKHAM_API_KEY
-        sync: false
