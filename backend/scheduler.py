@@ -16,7 +16,7 @@ from backend.scanners.exchange_flow import run_exchange_flow_monitor
 from backend.scanners.social_scanner import run_social_scanner
 from backend.scoring.scorer import run_score_recalculation
 from backend.trackers.wallet_tracker import run_wallet_tracker
-from backend.alerts.telegram_bot import fire_score_alert, fire_wallet_alert
+from backend.alerts.telegram_bot import fire_score_alert, fire_wallet_alert, send_daily_digest
 from backend.database import SessionLocal
 from backend.models.scan_log import ScanLog
 from backend.models.flagged_token import FlaggedToken
@@ -351,6 +351,13 @@ def setup_scheduler() -> AsyncIOScheduler:
         run_cleanup_job, "interval",
         hours=24,
         id="cleanup", name="Cleanup",
+    )
+
+    # Daily digest — once per day at 20:00 UTC
+    scheduler.add_job(
+        send_daily_digest, "cron",
+        hour=20, minute=0,
+        id="daily_digest", name="Daily Digest",
     )
 
     return scheduler
