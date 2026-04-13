@@ -151,15 +151,14 @@ async def _reconstruct_holders_from_logs(
 ) -> dict | None:
     """
     Reconstruct top holders by replaying Transfer events from eth_getLogs.
-    Computes net balances per wallet from all transfers.
+    Computes net balances per wallet from recent transfers.
+    Memory-efficient: scans only the last ~30k blocks in small chunks.
     """
     from collections import defaultdict
-    from decimal import Decimal
 
     # Known addresses to exclude (routers, burn addresses, exchanges)
     EXCLUDED = {
         "0x" + "0" * 40,
-        "0x" + "0" * 39 + "dead",
         "0x000000000000000000000000000000000000dead",
         "0x10ed43c718714eb63d5aa57b78b54704e256024e",  # PancakeSwap v2
         "0x13f4ea83d0bd40e75c8222255bc855a974568dd4",  # PancakeSwap v3
@@ -167,18 +166,16 @@ async def _reconstruct_holders_from_logs(
 
     balances: dict[str, int] = defaultdict(int)
 
-    # Fetch Transfer logs in chunks (eth_getLogs may limit response size)
-    # Get latest block to create ranges
     latest_block = await _rpc_call("eth_blockNumber", [])
     if not latest_block:
         return _etherscan_response([])
 
     latest = _hex_to_int(latest_block)
 
-    # Scan in chunks of 50000 blocks from the end (most recent activity matters most)
-    # For tokens < 50k blocks old, this gets everything
-    chunk_size = 50000
-    start_block = max(0, latest - chunk_size * 5)  # Last ~250k blocks
+    # Scan last ~30k blocks in chunks of 5000 (keeps memory low)
+    chunk_size = 5000
+    start_block = max(0, latest - 30000)
+    total_logs = 0
 
     for from_block in range(start_block, latest, chunk_size):
         to_block = min(from_block + chunk_size - 1, latest)
@@ -202,6 +199,12 @@ async def _reconstruct_holders_from_logs(
 
             balances[from_addr] -= amount
             balances[to_addr] += amount
+
+        total_logs += len(logs)
+        # Safety: stop if we've processed too many logs to avoid OOM
+        if total_logs > 20000:
+            logger.warning(f"Holder reconstruction capped at {total_logs} logs for {contract_address[:10]}")
+            break
 
     # Sort by balance, exclude zero/negative and infrastructure
     sorted_holders = sorted(
@@ -228,11 +231,16 @@ async def _reconstruct_holders_from_logs(
 async def _get_token_transfers_by_contract(
     contract_address: str, page: int, offset: int, sort: str
 ) -> dict | None:
-    """Get token transfers for a contract via eth_getLogs."""
+    """Get recent token transfers for a contract via eth_getLogs."""
+    # Only scan last 10k blocks to keep memory low
+    latest_block = await _rpc_call("eth_blockNumber", [])
+    latest = _hex_to_int(latest_block) if latest_block else 0
+    from_block = max(0, latest - 10000)
+
     logs = await _rpc_call("eth_getLogs", [{
         "address": contract_address.lower(),
         "topics": [TRANSFER_TOPIC],
-        "fromBlock": "0x0",
+        "fromBlock": hex(from_block),
         "toBlock": "latest",
     }])
     if logs is None:
@@ -268,13 +276,18 @@ async def _get_token_transfers_by_wallet(
     wallet_address: str, contract_address: str | None,
     page: int, offset: int, sort: str
 ) -> dict | None:
-    """Get token transfers for a wallet address."""
+    """Get token transfers for a wallet address (last ~30k blocks)."""
     padded_wallet = _pad_address(wallet_address)
+
+    # Only scan recent blocks to keep memory low
+    latest_block = await _rpc_call("eth_blockNumber", [])
+    latest = _hex_to_int(latest_block) if latest_block else 0
+    from_block_hex = hex(max(0, latest - 30000))
 
     # Get transfers FROM wallet
     from_filter = {
         "topics": [TRANSFER_TOPIC, padded_wallet],
-        "fromBlock": "0x0",
+        "fromBlock": from_block_hex,
         "toBlock": "latest",
     }
     if contract_address:
@@ -283,7 +296,7 @@ async def _get_token_transfers_by_wallet(
     # Get transfers TO wallet
     to_filter = {
         "topics": [TRANSFER_TOPIC, None, padded_wallet],
-        "fromBlock": "0x0",
+        "fromBlock": from_block_hex,
         "toBlock": "latest",
     }
     if contract_address:
@@ -345,11 +358,15 @@ async def _get_txlist(
     nonce = await _rpc_call("eth_getTransactionCount", [wallet_address.lower(), "latest"])
     nonce_int = _hex_to_int(nonce) if nonce else 0
 
-    # Get token transfers involving this wallet as a proxy for activity
+    # Get token transfers involving this wallet as a proxy for activity (last ~50k blocks)
+    latest_block = await _rpc_call("eth_blockNumber", [])
+    latest = _hex_to_int(latest_block) if latest_block else 0
+    from_block_hex = hex(max(0, latest - 50000))
+
     padded = _pad_address(wallet_address)
     to_logs = await _rpc_call("eth_getLogs", [{
         "topics": [TRANSFER_TOPIC, None, padded],
-        "fromBlock": "0x0",
+        "fromBlock": from_block_hex,
         "toBlock": "latest",
     }]) or []
 
