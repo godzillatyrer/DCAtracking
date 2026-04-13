@@ -402,9 +402,10 @@ def trigger_wallet_seed(background_tasks: BackgroundTasks):
 
 @router.get("/diagnostics")
 async def run_diagnostics():
-    """Test API connectivity — checks BscScan, DEX Screener, and database."""
+    """Test API connectivity — checks MegaNode, DEX Screener, and database."""
     import httpx
     from backend.config import settings
+    from backend.bscscan_client import _rpc_call, bscscan_request
     from backend.database import SessionLocal
     from backend.models.known_wallet import KnownWallet
     from backend.models.exchange_wallet import ExchangeWallet
@@ -412,29 +413,33 @@ async def run_diagnostics():
 
     results = {}
 
-    # 1. Check BscScan API
+    # 1. Check MegaNode RPC API
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            # Test with a simple call — get RAVE deployer
-            resp = await client.get(settings.BSCSCAN_BASE_URL, params={
-                "module": "contract",
-                "action": "getcontractcreation",
-                "contractaddresses": "0x17205fab260a7a6383a81452ce6315a39370db97",
-                "apikey": settings.BSCSCAN_API_KEY,
-                "chainid": settings.BSCSCAN_CHAIN_ID,
-            })
-            data = resp.json()
-            results["bscscan"] = {
-                "status": "ok" if data.get("status") == "1" else "error",
-                "api_key_set": bool(settings.BSCSCAN_API_KEY),
-                "api_key_preview": settings.BSCSCAN_API_KEY[:8] + "..." if settings.BSCSCAN_API_KEY else "NOT SET",
-                "response_status": data.get("status"),
-                "response_message": data.get("message"),
-                "result_preview": str(data.get("result", ""))[:200],
-                "url_used": settings.BSCSCAN_BASE_URL,
-            }
+        # Test basic RPC — get latest block number
+        block = await _rpc_call("eth_blockNumber", [])
+        block_num = int(block, 16) if block else None
+
+        # Test enhanced API — get RAVE token holders
+        holders_result = await bscscan_request({
+            "module": "token",
+            "action": "tokenholderlist",
+            "contractaddress": "0x17205fab260a7a6383a81452ce6315a39370db97",
+            "page": "1",
+            "offset": "5",
+        })
+        holder_count = len(holders_result.get("result", [])) if holders_result else 0
+
+        results["meganode"] = {
+            "status": "ok" if block_num else "error",
+            "api_key_set": bool(settings.MEGANODE_API_KEY),
+            "api_key_preview": settings.MEGANODE_API_KEY[:8] + "..." if settings.MEGANODE_API_KEY else "NOT SET",
+            "latest_block": block_num,
+            "holder_api_works": holder_count > 0,
+            "holders_returned": holder_count,
+            "url_used": settings.MEGANODE_BASE_URL,
+        }
     except Exception as e:
-        results["bscscan"] = {"status": "error", "error": str(e)}
+        results["meganode"] = {"status": "error", "error": str(e)}
 
     # 2. Check DEX Screener API
     try:
@@ -464,7 +469,7 @@ async def run_diagnostics():
 
     # 4. Config check
     results["config"] = {
-        "bscscan_key_set": bool(settings.BSCSCAN_API_KEY),
+        "meganode_key_set": bool(settings.MEGANODE_API_KEY),
         "anthropic_key_set": bool(settings.ANTHROPIC_API_KEY),
         "telegram_bot_set": bool(settings.TELEGRAM_BOT_TOKEN),
         "telegram_chat_set": bool(settings.TELEGRAM_CHAT_ID),
