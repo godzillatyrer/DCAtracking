@@ -4,6 +4,7 @@ import Dashboard from './components/Dashboard';
 import TokenDetail from './components/TokenDetail';
 import WalletTracker from './components/WalletTracker';
 import AlertLog from './components/AlertLog';
+import ScanActivity from './components/ScanActivity';
 
 const navStyle = {
   display: 'flex',
@@ -46,6 +47,9 @@ function App() {
           <NavLink to="/alerts" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
             Alert Log
           </NavLink>
+          <NavLink to="/activity" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+            Scanner Activity
+          </NavLink>
         </nav>
         <div style={{ padding: '24px' }}>
           <Routes>
@@ -53,6 +57,7 @@ function App() {
             <Route path="/token/:address" element={<TokenDetail />} />
             <Route path="/wallets" element={<WalletTracker />} />
             <Route path="/alerts" element={<AlertLog />} />
+            <Route path="/activity" element={<ScanActivity />} />
           </Routes>
         </div>
       </div>
