@@ -7,7 +7,7 @@ Uses tiered scoring where higher tiers REPLACE (not add to) lower tiers.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -15,11 +15,17 @@ from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.database import SessionLocal
 from backend.models.flagged_token import FlaggedToken
+from backend.models.known_wallet import KnownWallet
 from backend.models.token_profile import TokenProfile
+from backend.models.wallet_activity import WalletActivity
 from backend.models.watchlist import Watchlist
 from backend.models.token_score_history import TokenScoreHistory
 
 logger = logging.getLogger(__name__)
+
+# How recent a known-operator activity must be to count as "present" for
+# scoring. 7 days lines up with the ramp-up window of past confirmed pumps.
+KNOWN_OPERATOR_LOOKBACK_DAYS = 7
 
 # Scoring weights — tiered signals use the HIGHER value (not additive)
 SCORING_WEIGHTS = {
@@ -62,10 +68,31 @@ SCORING_WEIGHTS = {
 }
 
 
+def has_recent_known_operator_activity(db: Session, contract_address: str) -> bool:
+    """
+    Returns True if any known operator wallet has a flagged activity for
+    this token within the last KNOWN_OPERATOR_LOOKBACK_DAYS days.
+
+    This is the cross-path detection signal: when the volume scanner and
+    the wallet tracker independently surface the same token, score it
+    higher.
+    """
+    cutoff = datetime.utcnow() - timedelta(days=KNOWN_OPERATOR_LOOKBACK_DAYS)
+    known_addrs_subq = db.query(KnownWallet.wallet_address).filter(
+        KnownWallet.is_active.is_(True)
+    ).subquery()
+    return db.query(WalletActivity.id).filter(
+        WalletActivity.token_contract == contract_address.lower(),
+        WalletActivity.detected_at >= cutoff,
+        WalletActivity.wallet_address.in_(known_addrs_subq),
+    ).first() is not None
+
+
 def calculate_score(
     flagged: FlaggedToken,
     profile: TokenProfile | None,
     watchlist: Watchlist | None,
+    known_operator_recent: bool = False,
 ) -> tuple[int, dict]:
     """
     Calculate pump probability score for a token.
@@ -166,11 +193,17 @@ def calculate_score(
             breakdown["social_ramp_detected"] = SCORING_WEIGHTS["social_ramp_detected"]
             raw_score += SCORING_WEIGHTS["social_ramp_detected"]
 
-    # Check for known operator (stored in watchlist score_breakdown)
-    if watchlist and watchlist.score_breakdown:
-        if watchlist.score_breakdown.get("known_operator_present"):
-            breakdown["known_operator_present"] = SCORING_WEIGHTS["known_operator_present"]
-            raw_score += SCORING_WEIGHTS["known_operator_present"]
+    # Known operator present — surface from EITHER:
+    #   (a) wallet_analyzer detection (stored in watchlist.score_breakdown), or
+    #   (b) recent wallet_activity from a known operator wallet
+    operator_from_analyzer = bool(
+        watchlist
+        and watchlist.score_breakdown
+        and watchlist.score_breakdown.get("known_operator_present")
+    )
+    if operator_from_analyzer or known_operator_recent:
+        breakdown["known_operator_present"] = SCORING_WEIGHTS["known_operator_present"]
+        raw_score += SCORING_WEIGHTS["known_operator_present"]
 
     # Normalize to 0-100
     normalized = min(100, raw_score)
@@ -208,8 +241,9 @@ def score_token(db: Session, contract_address: str) -> tuple[int, dict]:
 
     profile = db.query(TokenProfile).filter_by(contract_address=contract_address).first()
     watchlist = db.query(Watchlist).filter_by(contract_address=contract_address).first()
+    known_op_recent = has_recent_known_operator_activity(db, contract_address)
 
-    score, breakdown = calculate_score(flagged, profile, watchlist)
+    score, breakdown = calculate_score(flagged, profile, watchlist, known_op_recent)
     confidence = determine_confidence(score)
     new_status = determine_status(score, flagged.status)
 
@@ -252,7 +286,11 @@ def score_token(db: Session, contract_address: str) -> tuple[int, dict]:
 
 
 async def run_score_recalculation():
-    """Recalculate scores for all active tokens. Called every 30 minutes."""
+    """Recalculate scores for all enriched active tokens. Called every 30 minutes.
+
+    Skips stub tokens (no symbol/price) so we don't rack up wasted work or
+    create empty watchlist entries — those are filtered at query time.
+    """
     logger.info("Starting score recalculation run...")
     db = SessionLocal()
     scored_count = 0
@@ -260,8 +298,10 @@ async def run_score_recalculation():
 
     try:
         active_tokens = db.query(FlaggedToken).filter(
-            FlaggedToken.status.in_(["raw", "candidate", "watchlist"]),
+            FlaggedToken.status.in_(["candidate", "watchlist", "alerted"]),
             FlaggedToken.removed.is_(False),
+            FlaggedToken.token_symbol.isnot(None),
+            FlaggedToken.price_usd.isnot(None),
         ).all()
 
         logger.info(f"Recalculating scores for {len(active_tokens)} tokens")

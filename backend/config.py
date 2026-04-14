@@ -36,14 +36,20 @@ class Settings(BaseSettings):
     WATCHLIST_THRESHOLD: int = 50
     MAX_ALERTS_PER_DAY: int = 5
 
-    # Scanner intervals (minutes)
+    # Scanner intervals (minutes).
+    # Cadences are tuned so the enrichment pipeline keeps up with the
+    # ~580/hr raw-flag rate from the volume scanner.
     VOLUME_SCAN_INTERVAL: int = 15
-    PROFILE_CHECK_INTERVAL: int = 60
+    PROFILE_CHECK_INTERVAL: int = 30   # was 60 — drains backlog faster
     WALLET_ANALYZE_INTERVAL: int = 240
     EXCHANGE_FLOW_INTERVAL: int = 30
     SOCIAL_SCAN_INTERVAL: int = 120
     WALLET_TRACK_INTERVAL: int = 30
     SCORE_RECALC_INTERVAL: int = 30
+
+    # Wallet tracker dust filter — skip token transfers whose USD value
+    # cannot be estimated to be above this threshold.
+    WALLET_TRACK_MIN_USD: float = 500.0
 
     class Config:
         env_file = ".env"

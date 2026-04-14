@@ -3,6 +3,8 @@ Dashboard API routes — summary stats, main scanner views, and activity logs.
 """
 
 import asyncio
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query, BackgroundTasks
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
@@ -19,17 +21,33 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 @router.get("/overview")
 def get_overview(db: Session = Depends(get_db)):
-    """Summary stats: active flags, watchlist count, alert count, win rate."""
+    """Summary stats: active flags, watchlist count, alert count, win rate.
+
+    Only counts tokens with real market data (skips stub auto-flags created
+    from wallet_tracker before profile enrichment). Also only counts
+    Telegram-sent alerts, not internal placeholders.
+    """
     active_flags = db.query(func.count(FlaggedToken.id)).filter(
         FlaggedToken.status.in_(["raw", "candidate"]),
         FlaggedToken.removed.is_(False),
+        FlaggedToken.token_symbol.isnot(None),
+        FlaggedToken.price_usd.isnot(None),
     ).scalar()
 
-    watchlist_count = db.query(func.count(Watchlist.id)).scalar()
+    # Only count watchlist entries that link to a real, enriched token.
+    watchlist_count = db.query(func.count(Watchlist.id)).join(
+        FlaggedToken, FlaggedToken.contract_address == Watchlist.contract_address
+    ).filter(
+        FlaggedToken.token_symbol.isnot(None),
+        FlaggedToken.price_usd.isnot(None),
+    ).scalar()
 
-    alerts_total = db.query(func.count(Alert.id)).scalar()
+    alerts_total = db.query(func.count(Alert.id)).filter(
+        Alert.telegram_sent.is_(True),
+    ).scalar()
     alerts_today = db.query(func.count(Alert.id)).filter(
-        func.date(Alert.fired_at) == func.current_date()
+        func.date(Alert.fired_at) == func.current_date(),
+        Alert.telegram_sent.is_(True),
     ).scalar()
 
     # Win rate calculation
@@ -60,8 +78,16 @@ def get_flagged_tokens(
     sort_dir: str = "desc",
     db: Session = Depends(get_db),
 ):
-    """All flagged tokens with scores, paginated and sortable."""
-    query = db.query(FlaggedToken).filter(FlaggedToken.removed.is_(False))
+    """All flagged tokens with scores, paginated and sortable.
+
+    Excludes stubs (no symbol/price) — these are auto-flag placeholders
+    waiting on volume scanner / profile checker enrichment.
+    """
+    query = db.query(FlaggedToken).filter(
+        FlaggedToken.removed.is_(False),
+        FlaggedToken.token_symbol.isnot(None),
+        FlaggedToken.price_usd.isnot(None),
+    )
 
     if status:
         query = query.filter(FlaggedToken.status == status)
@@ -109,33 +135,50 @@ def get_watchlist(
     per_page: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    """Watchlist tokens with full details."""
-    query = db.query(Watchlist).order_by(Watchlist.current_score.desc())
-    total = query.count()
-    entries = query.offset((page - 1) * per_page).limit(per_page).all()
+    """Watchlist tokens with full details.
+
+    Joins to FlaggedToken and only returns rows where the token has real
+    market data — this hides the stub watchlist entries that previously
+    rendered as '?' / N/A / score 0 across the dashboard.
+    """
+    base = (
+        db.query(Watchlist, FlaggedToken)
+        .join(FlaggedToken, FlaggedToken.contract_address == Watchlist.contract_address)
+        .filter(
+            FlaggedToken.token_symbol.isnot(None),
+            FlaggedToken.price_usd.isnot(None),
+            FlaggedToken.removed.is_(False),
+        )
+        .order_by(Watchlist.current_score.desc(), FlaggedToken.last_seen_at.desc())
+    )
+    total = base.count()
+    rows = base.offset((page - 1) * per_page).limit(per_page).all()
 
     results = []
-    for w in entries:
-        flagged = db.query(FlaggedToken).filter_by(contract_address=w.contract_address).first()
+    for w, flagged in rows:
+        # Only surface cluster info when wallet_analyzer has actually scored
+        # this token (last_scored_at present). Otherwise the count is from
+        # uninitialised defaults and would mislead the UI.
+        analyzer_ran = w.last_scored_at is not None
         results.append({
             "contract_address": w.contract_address,
-            "token_name": flagged.token_name if flagged else None,
-            "token_symbol": flagged.token_symbol if flagged else None,
-            "price_usd": str(flagged.price_usd) if flagged and flagged.price_usd else None,
-            "volume_24h": str(flagged.volume_24h) if flagged and flagged.volume_24h else None,
-            "market_cap": str(flagged.market_cap) if flagged and flagged.market_cap else None,
+            "token_name": flagged.token_name,
+            "token_symbol": flagged.token_symbol,
+            "price_usd": str(flagged.price_usd) if flagged.price_usd else None,
+            "volume_24h": str(flagged.volume_24h) if flagged.volume_24h else None,
+            "market_cap": str(flagged.market_cap) if flagged.market_cap else None,
             "current_score": w.current_score,
             "score_breakdown": w.score_breakdown,
             "confidence_level": w.confidence_level,
-            "cluster_detected": w.cluster_detected,
-            "cluster_wallet_count": w.cluster_wallet_count,
+            "cluster_detected": bool(w.cluster_detected) if analyzer_ran else None,
+            "cluster_wallet_count": w.cluster_wallet_count if analyzer_ran else None,
             "exchange_deposits_detected": w.exchange_deposits_detected,
             "social_signal_detected": w.social_signal_detected,
             "alert_fired": w.alert_fired,
             "alert_fired_at": w.alert_fired_at.isoformat() if w.alert_fired_at else None,
             "outcome": w.outcome,
             "added_at": w.added_at.isoformat() if w.added_at else None,
-            "dex_url": flagged.dex_url if flagged else None,
+            "dex_url": flagged.dex_url,
         })
 
     return {
@@ -150,10 +193,20 @@ def get_watchlist(
 def get_alerts(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
+    include_unsent: bool = False,
     db: Session = Depends(get_db),
 ):
-    """Alert history with outcomes."""
-    query = db.query(Alert).order_by(Alert.fired_at.desc())
+    """Alert history with outcomes.
+
+    Default view shows only alerts that were actually delivered to Telegram
+    (signal-quality moves). Pass `include_unsent=true` to see internally
+    suppressed alerts (e.g. daily-limit-throttled).
+    """
+    query = db.query(Alert)
+    if not include_unsent:
+        query = query.filter(Alert.telegram_sent.is_(True))
+    query = query.order_by(Alert.fired_at.desc())
+
     total = query.count()
     alerts = query.offset((page - 1) * per_page).limit(per_page).all()
 
@@ -202,7 +255,9 @@ def get_stats(db: Session = Depends(get_db)):
         avg_lead_time = sum(lead_times) / len(lead_times) if lead_times else 0
 
     return {
-        "total_alerts": db.query(func.count(Alert.id)).scalar(),
+        "total_alerts": db.query(func.count(Alert.id)).filter(
+            Alert.telegram_sent.is_(True),
+        ).scalar(),
         "total_reviewed": total_reviewed,
         "wins": len(wins),
         "fizzles": len(fizzles),
@@ -387,12 +442,43 @@ def _run_seeder_background():
             db.close()
 
 
+SEEDER_COOLDOWN_HOURS = 24
+
+
 @router.post("/seed-wallets")
-def trigger_wallet_seed(background_tasks: BackgroundTasks):
+def trigger_wallet_seed(
+    background_tasks: BackgroundTasks,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
     """
     Trigger the wallet seeder to extract known wallets from the 5 confirmed
     pump tokens. Runs in the background — check scan logs for progress.
+
+    To prevent accidental repeat clicks (which had run the seeder 17 times
+    in past sessions), this is rate-limited to once per SEEDER_COOLDOWN_HOURS
+    unless `force=true` is passed.
     """
+    from datetime import timedelta
+    recent = (
+        db.query(ScanLog)
+        .filter(
+            ScanLog.job_name == "wallet_seeder",
+            ScanLog.started_at >= datetime.utcnow() - timedelta(hours=SEEDER_COOLDOWN_HOURS),
+        )
+        .order_by(ScanLog.started_at.desc())
+        .first()
+    )
+    if recent and not force:
+        return {
+            "status": "skipped",
+            "message": (
+                f"Seeder already ran at {recent.started_at.isoformat()}. "
+                f"Cooldown is {SEEDER_COOLDOWN_HOURS}h — pass force=true to re-run."
+            ),
+            "last_run": recent.started_at.isoformat(),
+        }
+
     background_tasks.add_task(_run_seeder_background)
     return {
         "status": "started",
