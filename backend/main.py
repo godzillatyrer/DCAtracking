@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from backend.database import Base, engine
+from backend.database import Base, SessionLocal, engine
 from backend.scheduler import setup_scheduler
 from backend.api.dashboard import router as dashboard_router
 from backend.api.tokens import router as tokens_router
@@ -32,6 +32,67 @@ logger = logging.getLogger(__name__)
 
 # Create tables on startup
 Base.metadata.create_all(bind=engine)
+
+
+def _cleanup_legacy_data() -> None:
+    """
+    One-shot data cleanup at boot to scrub the artifacts of the old
+    wallet_tracker alert spam (5,406 placeholder alerts, stub watchlist
+    entries with bogus cluster counts).
+
+    Idempotent: each run only deletes the specific patterns we know are
+    invalid. Real data is never touched.
+    """
+    from sqlalchemy import or_
+    from backend.models.alert import Alert
+    from backend.models.flagged_token import FlaggedToken
+    from backend.models.watchlist import Watchlist
+
+    db = SessionLocal()
+    try:
+        # 1. Delete unsent wallet_tracker placeholder alerts
+        # ("Pending data enrichment" rows that never reached Telegram).
+        deleted_alerts = (
+            db.query(Alert)
+            .filter(
+                Alert.alert_type == "wallet_tracker",
+                Alert.telegram_sent.is_(False),
+            )
+            .delete(synchronize_session=False)
+        )
+
+        # 2. Delete watchlist entries that point to stub flagged_tokens
+        # (no symbol or no price). These produced the "?" / N/A rows on
+        # the dashboard with bogus YES (N) cluster counts.
+        stub_addrs_subq = (
+            db.query(FlaggedToken.contract_address)
+            .filter(
+                or_(
+                    FlaggedToken.token_symbol.is_(None),
+                    FlaggedToken.price_usd.is_(None),
+                )
+            )
+            .subquery()
+        )
+        deleted_watch = (
+            db.query(Watchlist)
+            .filter(Watchlist.contract_address.in_(stub_addrs_subq))
+            .delete(synchronize_session=False)
+        )
+
+        db.commit()
+        logger.info(
+            f"Startup cleanup: removed {deleted_alerts} placeholder alerts "
+            f"and {deleted_watch} stub watchlist entries."
+        )
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"Startup cleanup skipped due to error: {e}")
+    finally:
+        db.close()
+
+
+_cleanup_legacy_data()
 
 # Track scheduler globally so it can be shut down cleanly
 _scheduler = None

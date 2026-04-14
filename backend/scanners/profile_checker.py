@@ -2,8 +2,13 @@
 Step 2: Token Profile Checker — BscScan token enrichment.
 
 Enriches flagged tokens with supply data, holder concentration,
-contract metadata, and narrative classification.
-Runs every 1 hour for tokens with status='raw'.
+contract metadata, and narrative classification. After enrichment,
+promotes status raw → candidate so downstream stages (wallet_analyzer,
+scorer) pick them up.
+
+Runs frequently (default 30 min). Limited to PROFILE_CHECK_BATCH_SIZE
+tokens per run to keep each run within timeout budgets when there is
+a large backlog.
 """
 
 import logging
@@ -19,6 +24,10 @@ from backend.models.flagged_token import FlaggedToken
 from backend.models.token_profile import TokenProfile
 
 logger = logging.getLogger(__name__)
+
+# Max tokens to enrich per run. Each enrichment makes ~5 RPC calls + several
+# log scans, so the batch must stay small enough to finish within the run window.
+DEFAULT_BATCH_SIZE = 50
 
 # Narrative keywords for classification
 NARRATIVE_KEYWORDS = {
@@ -160,7 +169,11 @@ def calculate_holder_concentration(holders: list[dict], total_supply: Decimal | 
 
 
 async def enrich_token(contract_address: str, db: Session) -> bool:
-    """Enrich a single token with profile data. Returns True if successful."""
+    """Enrich a single token with profile data. Returns True if successful.
+
+    On success, promotes the FlaggedToken from 'raw' to 'candidate' so that
+    wallet_analyzer, exchange_flow_monitor, and the scorer can act on it.
+    """
     flagged = db.query(FlaggedToken).filter_by(contract_address=contract_address).first()
     if not flagged:
         return False
@@ -216,34 +229,73 @@ async def enrich_token(contract_address: str, db: Session) -> bool:
         profile = TokenProfile(contract_address=contract_address, **profile_data)
         db.add(profile)
 
+    # Promote raw → candidate so downstream jobs pick it up.
+    # We only promote tokens that have at least basic market data — pure stubs
+    # (e.g. auto-flagged from wallet tracker) stay 'raw' until volume scanner
+    # populates name/price/volume in a future run.
+    if (
+        flagged.status == "raw"
+        and (flagged.token_name or flagged.token_symbol)
+        and flagged.price_usd
+    ):
+        flagged.status = "candidate"
+
     db.commit()
     return True
 
 
-async def run_profile_checker():
-    """Main profile checker entry point. Called every 1 hour."""
+async def run_profile_checker(batch_size: int = DEFAULT_BATCH_SIZE):
+    """
+    Main profile checker entry point.
+
+    Processes up to `batch_size` raw tokens per run, oldest-flagged first,
+    so a backlog of hundreds of raw tokens still drains predictably without
+    hitting per-run timeouts.
+    """
     logger.info("Starting profile checker run...")
     db = SessionLocal()
     enriched_count = 0
+    promoted_count = 0
 
     try:
-        raw_tokens = db.query(FlaggedToken).filter(
+        raw_tokens = (
+            db.query(FlaggedToken)
+            .filter(
+                FlaggedToken.status == "raw",
+                FlaggedToken.removed.is_(False),
+                # Skip pure stubs from wallet_tracker auto-flag — let the
+                # volume scanner discover them with real data first.
+                FlaggedToken.token_symbol.isnot(None),
+            )
+            .order_by(FlaggedToken.first_flagged_at.asc())
+            .limit(batch_size)
+            .all()
+        )
+
+        total_raw = db.query(FlaggedToken).filter(
             FlaggedToken.status == "raw",
             FlaggedToken.removed.is_(False),
-        ).all()
-
-        logger.info(f"Found {len(raw_tokens)} raw tokens to enrich")
+        ).count()
+        logger.info(
+            f"Found {total_raw} raw tokens (processing {len(raw_tokens)} this run)"
+        )
 
         for token in raw_tokens:
             try:
+                prev_status = token.status
                 success = await enrich_token(token.contract_address, db)
                 if success:
                     enriched_count += 1
+                    if token.status == "candidate" and prev_status == "raw":
+                        promoted_count += 1
             except Exception as e:
                 logger.error(f"Error enriching {token.contract_address}: {e}")
                 continue
 
-        logger.info(f"Profile checker complete. Enriched {enriched_count} tokens.")
+        logger.info(
+            f"Profile checker complete. Enriched {enriched_count} tokens, "
+            f"promoted {promoted_count} raw→candidate."
+        )
 
     except Exception as e:
         logger.error(f"Profile checker error: {e}")

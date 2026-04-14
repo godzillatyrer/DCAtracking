@@ -4,7 +4,7 @@ Every job run is logged to the scan_logs table for observability.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -16,7 +16,7 @@ from backend.scanners.exchange_flow import run_exchange_flow_monitor
 from backend.scanners.social_scanner import run_social_scanner
 from backend.scoring.scorer import run_score_recalculation
 from backend.trackers.wallet_tracker import run_wallet_tracker
-from backend.alerts.telegram_bot import fire_score_alert, fire_wallet_alert, send_daily_digest
+from backend.alerts.telegram_bot import fire_score_alert, send_daily_digest
 from backend.database import SessionLocal
 from backend.models.scan_log import ScanLog
 from backend.models.flagged_token import FlaggedToken
@@ -187,7 +187,15 @@ async def run_social_scanner_job():
 
 
 async def run_wallet_tracker_job():
-    """Wallet tracker with logging and alert triggering."""
+    """
+    Wallet tracker with logging.
+
+    Notable activities are stored to wallet_activity table only. They do NOT
+    fire alerts directly — instead the scorer reads recent activity and
+    contributes points to the token score (known_operator_present = +30).
+    A Telegram alert is only fired when the combined token score crosses
+    the ALERT_THRESHOLD via run_scorer_job.
+    """
     started = datetime.utcnow()
     try:
         notable = await run_wallet_tracker()
@@ -213,11 +221,6 @@ async def run_wallet_tracker_job():
             details=f"Tracked {active_wallets} known wallets. {len(notable)} notable activities. {notable_summary}",
             started_at=started, finished_at=finished,
         )
-
-        # Fire alerts for high-priority activities
-        for item in notable:
-            if item.get("is_new_token") or item.get("activity") == "exchange_deposit":
-                await fire_wallet_alert(item)
     except Exception as e:
         logger.error(f"Wallet tracker job failed: {e}")
         log_scan("wallet_tracker", "error", error_message=str(e),
@@ -294,63 +297,85 @@ async def run_cleanup_job():
 
 
 def setup_scheduler() -> AsyncIOScheduler:
-    """Configure and return the APScheduler instance."""
-    scheduler = AsyncIOScheduler()
+    """
+    Configure and return the APScheduler instance.
 
-    # Step 1: Volume scanner — every 15 minutes
+    Render redeploys reset the in-process scheduler. To avoid 4-hour and 24-hour
+    jobs never firing between deploys, we stagger an immediate first run for
+    every job (using next_run_time with small offsets). max_instances=1 prevents
+    overlapping runs of the same job; misfire_grace_time keeps catch-up sane.
+    """
+    scheduler = AsyncIOScheduler(job_defaults={
+        "max_instances": 1,
+        "coalesce": True,
+        "misfire_grace_time": 60 * 30,  # 30 min grace for missed runs
+    })
+
+    now = datetime.utcnow()
+
+    # Step 1: Volume scanner — every 15 minutes (first run: ~30s after boot)
     scheduler.add_job(
         run_volume_scanner_job, "interval",
         minutes=settings.VOLUME_SCAN_INTERVAL,
         id="volume_scanner", name="Volume Scanner",
+        next_run_time=now + timedelta(seconds=30),
     )
 
-    # Step 2: Profile checker — every 1 hour
+    # Step 2: Profile checker — every PROFILE_CHECK_INTERVAL min (first run: 2 min)
     scheduler.add_job(
         run_profile_checker_job, "interval",
         minutes=settings.PROFILE_CHECK_INTERVAL,
         id="profile_checker", name="Profile Checker",
+        next_run_time=now + timedelta(minutes=2),
     )
 
-    # Step 3: Wallet analyzer — every 4 hours
+    # Step 3: Wallet analyzer — every 4 hours (first run: 5 min after boot)
+    # Without an immediate first run, this never fires between Render redeploys.
     scheduler.add_job(
         run_wallet_analyzer_job, "interval",
         minutes=settings.WALLET_ANALYZE_INTERVAL,
         id="wallet_analyzer", name="Wallet Analyzer",
+        next_run_time=now + timedelta(minutes=5),
     )
 
-    # Step 4: Exchange flow monitor — every 30 minutes
+    # Step 4: Exchange flow monitor — every 30 min (first run: 3 min)
     scheduler.add_job(
         run_exchange_flow_job, "interval",
         minutes=settings.EXCHANGE_FLOW_INTERVAL,
         id="exchange_flow", name="Exchange Flow Monitor",
+        next_run_time=now + timedelta(minutes=3),
     )
 
-    # Step 5: Social scanner — every 2 hours
+    # Step 5: Social scanner — every 2 hours (first run: 10 min)
     scheduler.add_job(
         run_social_scanner_job, "interval",
         minutes=settings.SOCIAL_SCAN_INTERVAL,
         id="social_scanner", name="Social Scanner",
+        next_run_time=now + timedelta(minutes=10),
     )
 
-    # Known wallet tracker — every 30 minutes
+    # Known wallet tracker — every 30 min (first run: 1 min)
     scheduler.add_job(
         run_wallet_tracker_job, "interval",
         minutes=settings.WALLET_TRACK_INTERVAL,
         id="wallet_tracker", name="Wallet Tracker",
+        next_run_time=now + timedelta(minutes=1),
     )
 
-    # Score recalculation — every 30 minutes
+    # Score recalculation — every 30 min (first run: 4 min, after profile_checker)
     scheduler.add_job(
         run_scorer_job, "interval",
         minutes=settings.SCORE_RECALC_INTERVAL,
         id="scorer", name="Score Recalculator",
+        next_run_time=now + timedelta(minutes=4),
     )
 
-    # Cleanup — every 24 hours
+    # Cleanup — every 6 hours (was 24h, never fired between deploys); first run: 8 min
     scheduler.add_job(
         run_cleanup_job, "interval",
-        hours=24,
+        hours=6,
         id="cleanup", name="Cleanup",
+        next_run_time=now + timedelta(minutes=8),
     )
 
     # Daily digest — once per day at 20:00 UTC

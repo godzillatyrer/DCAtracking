@@ -94,10 +94,12 @@ function TokenTable({ tokens }) {
                 </span>
               </td>
               <td style={tdStyle}>
-                {t.cluster_detected ? (
+                {t.cluster_detected === true ? (
                   <span style={{ color: '#ff4444' }}>YES ({t.cluster_wallet_count})</span>
-                ) : (
+                ) : t.cluster_detected === false ? (
                   <span style={{ color: '#444' }}>No</span>
+                ) : (
+                  <span style={{ color: '#555', fontStyle: 'italic' }} title="Wallet analyzer hasn't scored this token yet">pending</span>
                 )}
               </td>
               <td style={tdStyle}>
