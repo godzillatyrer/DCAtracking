@@ -23,6 +23,18 @@ from backend.models.flagged_token import FlaggedToken
 from backend.models.watchlist import Watchlist
 from backend.models.known_wallet import KnownWallet
 
+# Phase 2: launch + exploit detection
+from backend.detection.launch_scorer import run_launch_scorer
+from backend.detection.deployer_watcher import run_deployer_watcher
+from backend.detection.whale_fresh_wallet import run_whale_fresh_watcher
+from backend.detection.pair_watcher import run_pair_watcher
+from backend.detection.exploit_watcher import run_exploit_watcher
+from backend.detection.operator_graph import run_operator_graph
+from backend.detection.bytecode_match import run_bytecode_match
+from backend.detection.portfolio_gate import run_portfolio_gate
+from backend.detection.launchpad_watcher import run_launchpad_watcher
+from backend.detection.treasury_outflow import run_treasury_outflow
+
 logger = logging.getLogger(__name__)
 
 
@@ -296,6 +308,41 @@ async def run_cleanup_job():
                  started_at=started, finished_at=datetime.utcnow())
 
 
+# ─── Phase 2: launch + exploit detection job wrappers ─────────────────
+
+def _wrap_launch_job(job_name: str, coro):
+    """Generic wrapper that logs start/finish and catches exceptions."""
+    async def _wrapped():
+        started = datetime.utcnow()
+        try:
+            result = await coro()
+            details = str(result) if result is not None else "ok"
+            log_scan(
+                job_name, "success", details=details,
+                started_at=started, finished_at=datetime.utcnow(),
+            )
+        except Exception as e:
+            logger.error(f"{job_name} failed: {e}")
+            log_scan(
+                job_name, "error", error_message=str(e),
+                started_at=started, finished_at=datetime.utcnow(),
+            )
+    _wrapped.__name__ = f"run_{job_name}_job"
+    return _wrapped
+
+
+run_deployer_watcher_job   = _wrap_launch_job("deployer_watcher",   run_deployer_watcher)
+run_whale_fresh_job        = _wrap_launch_job("whale_fresh_watcher", run_whale_fresh_watcher)
+run_pair_watcher_job       = _wrap_launch_job("pair_watcher",       run_pair_watcher)
+run_launch_scorer_job      = _wrap_launch_job("launch_scorer",      run_launch_scorer)
+run_exploit_watcher_job    = _wrap_launch_job("exploit_watcher",    run_exploit_watcher)
+run_operator_graph_job     = _wrap_launch_job("operator_graph",     run_operator_graph)
+run_bytecode_match_job     = _wrap_launch_job("bytecode_match",     run_bytecode_match)
+run_portfolio_gate_job     = _wrap_launch_job("portfolio_gate",     run_portfolio_gate)
+run_launchpad_watcher_job  = _wrap_launch_job("launchpad_watcher",  run_launchpad_watcher)
+run_treasury_outflow_job   = _wrap_launch_job("treasury_outflow",   run_treasury_outflow)
+
+
 def setup_scheduler() -> AsyncIOScheduler:
     """
     Configure and return the APScheduler instance.
@@ -383,6 +430,87 @@ def setup_scheduler() -> AsyncIOScheduler:
         send_daily_digest, "cron",
         hour=20, minute=0,
         id="daily_digest", name="Daily Digest",
+    )
+
+    # ─── Phase 2: launch + exploit detection ──────────────────────────
+    # Pair watcher — every 5 min (catches new DEX pools, Modules 4/5/9)
+    scheduler.add_job(
+        run_pair_watcher_job, "interval",
+        minutes=settings.PAIR_WATCHER_INTERVAL_MIN,
+        id="pair_watcher", name="Pair Watcher",
+        next_run_time=now + timedelta(minutes=2),
+    )
+
+    # Deployer watcher — every 10 min (Modules 1/2 + Module 3 Phase B)
+    scheduler.add_job(
+        run_deployer_watcher_job, "interval",
+        minutes=settings.DEPLOYER_WATCHER_INTERVAL_MIN,
+        id="deployer_watcher", name="Golden Deployer Watcher",
+        next_run_time=now + timedelta(minutes=3),
+    )
+
+    # Whale-fresh-wallet funding scanner — every 10 min (Module 3 Phase A)
+    scheduler.add_job(
+        run_whale_fresh_job, "interval",
+        minutes=settings.WHALE_FRESH_WATCHER_INTERVAL_MIN,
+        id="whale_fresh_watcher", name="Whale→Fresh Funding",
+        next_run_time=now + timedelta(minutes=6),
+    )
+
+    # Launch scorer — every 2 min (aggregates signals → tiered alerts)
+    scheduler.add_job(
+        run_launch_scorer_job, "interval",
+        minutes=settings.LAUNCH_SCORER_INTERVAL_MIN,
+        id="launch_scorer", name="Launch Scorer",
+        next_run_time=now + timedelta(minutes=4),
+    )
+
+    # Exploit watcher — every 3 min (Module 14)
+    scheduler.add_job(
+        run_exploit_watcher_job, "interval",
+        minutes=settings.EXPLOIT_WATCHER_INTERVAL_MIN,
+        id="exploit_watcher", name="Exploit Watcher",
+        next_run_time=now + timedelta(minutes=5),
+    )
+
+    # Operator graph — every 15 min (Modules 6 + 11)
+    scheduler.add_job(
+        run_operator_graph_job, "interval",
+        minutes=15,
+        id="operator_graph", name="Operator Graph",
+        next_run_time=now + timedelta(minutes=7),
+    )
+
+    # Bytecode match — every 30 min (Module 7)
+    scheduler.add_job(
+        run_bytecode_match_job, "interval",
+        minutes=30,
+        id="bytecode_match", name="Bytecode Fingerprint",
+        next_run_time=now + timedelta(minutes=12),
+    )
+
+    # Portfolio gate — every 60 min (Module 8, filter only)
+    scheduler.add_job(
+        run_portfolio_gate_job, "interval",
+        minutes=60,
+        id="portfolio_gate", name="Portfolio Gate",
+        next_run_time=now + timedelta(minutes=15),
+    )
+
+    # Launchpad watcher — every 30 min (Module 12)
+    scheduler.add_job(
+        run_launchpad_watcher_job, "interval",
+        minutes=30,
+        id="launchpad_watcher", name="Launchpad Watcher",
+        next_run_time=now + timedelta(minutes=20),
+    )
+
+    # Treasury outflow — every 30 min (Module 13)
+    scheduler.add_job(
+        run_treasury_outflow_job, "interval",
+        minutes=settings.TREASURY_OUTFLOW_INTERVAL_MIN,
+        id="treasury_outflow", name="Treasury Outflow",
+        next_run_time=now + timedelta(minutes=9),
     )
 
     return scheduler

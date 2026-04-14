@@ -12,14 +12,25 @@ const cardStyle = {
 
 const JOB_LABELS = {
   volume_scanner: { label: 'Volume Scanner', icon: '~15m', desc: 'Scans DEX Screener for BSC volume spikes' },
-  profile_checker: { label: 'Profile Checker', icon: '~1h', desc: 'Enriches tokens via BscScan (supply, holders, contract)' },
+  profile_checker: { label: 'Profile Checker', icon: '~30m', desc: 'Enriches tokens via BscScan (supply, holders, contract)' },
   wallet_analyzer: { label: 'Wallet Analyzer', icon: '~4h', desc: 'Traces holder funding sources for cluster detection' },
   exchange_flow: { label: 'Exchange Flow', icon: '~30m', desc: 'Monitors deposits/withdrawals to known exchange wallets' },
   social_scanner: { label: 'Social Scanner', icon: '~2h', desc: 'Checks CoinGecko trending and social mentions' },
   wallet_tracker: { label: 'Wallet Tracker', icon: '~30m', desc: 'Follows known operator wallets for new activity' },
   scorer: { label: 'Score Calculator', icon: '~30m', desc: 'Recalculates 0-100 scores for all active tokens' },
-  cleanup: { label: 'Cleanup', icon: '~24h', desc: 'Expires old flagged tokens not seen in 7+ days' },
+  cleanup: { label: 'Cleanup', icon: '~6h', desc: 'Expires old flagged tokens not seen in 7+ days' },
   wallet_seeder: { label: 'Wallet Seeder', icon: 'manual', desc: 'Extracts known wallets from confirmed pump tokens (RAVE, SIREN, RIVER, ARIA, STO)' },
+  // Phase 2 — launch + exploit detection
+  pair_watcher:      { label: 'Pair Watcher',      icon: '~5m',  desc: 'New DEX pools + insider early-buyer cluster detection (M4/5/9)' },
+  deployer_watcher:  { label: 'Deployer Watcher',  icon: '~10m', desc: 'New contract deploys from golden deployers + labeled entities (M1/2)' },
+  whale_fresh_watcher: { label: 'Whale→Fresh',     icon: '~10m', desc: 'Tracks whale funding to fresh wallets (TRUMP pattern, M3)' },
+  launch_scorer:     { label: 'Launch Scorer',     icon: '~2m',  desc: 'Aggregates signals → tiered alerts (S/A/B/C)' },
+  exploit_watcher:   { label: 'Exploit Watcher',   icon: '~3m',  desc: 'TVL drops, abnormal mints, bridge drains — short alerts (M14)' },
+  operator_graph:    { label: 'Operator Graph',    icon: '~15m', desc: 'Same-operator + burner sweeping detection (M6/11)' },
+  bytecode_match:    { label: 'Bytecode Match',    icon: '~30m', desc: 'Compares new contract bytecode to confirmed-pump templates (M7)' },
+  portfolio_gate:    { label: 'Portfolio Gate',    icon: '~1h',  desc: 'Filter: deployer holds >$1M in assets (M8)' },
+  launchpad_watcher: { label: 'Launchpad Watcher', icon: '~30m', desc: 'Known wallets receiving launchpad allocations (M12)' },
+  treasury_outflow:  { label: 'Treasury Outflow',  icon: '~30m', desc: 'Treasury/multisig outflows to fresh wallets (M13)' },
 };
 
 function statusBadge(status) {

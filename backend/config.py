@@ -31,21 +31,80 @@ class Settings(BaseSettings):
     # DEX Screener (no key needed)
     DEXSCREENER_BASE_URL: str = "https://api.dexscreener.com"
 
-    # Scoring thresholds
+    # ─── Phase 2: launch detection + exploit watcher ───────────────────
+    # DeFi Llama (no key needed)
+    DEFILLAMA_BASE_URL: str = "https://api.llama.fi"
+    DEFILLAMA_COINS_URL: str = "https://coins.llama.fi"
+
+    # GeckoTerminal (no key needed)
+    GECKOTERMINAL_BASE_URL: str = "https://api.geckoterminal.com/api/v2"
+
+    # Helius (Solana RPC)
+    HELIUS_API_KEY: str = ""
+    HELIUS_BASE_URL: str = "https://mainnet.helius-rpc.com"
+
+    # Nansen (Smart Money labels, launch watcher)
+    NANSEN_API_KEY: str = ""
+    NANSEN_BASE_URL: str = "https://api.nansen.ai/api/beta"
+
+    # GMGN (Solana smart money tracker)
+    GMGN_API_KEY: str = ""
+    GMGN_BASE_URL: str = "https://gmgn.ai/defi/quotation/v1"
+
+    # Birdeye (Solana token data)
+    BIRDEYE_API_KEY: str = ""
+    BIRDEYE_BASE_URL: str = "https://public-api.birdeye.so"
+
+    # ─── Alert gating ─────────────────────────────────────────────────
+    # Launch-detection scoring/alert thresholds
+    LAUNCH_SCORE_S_TIER: int = 80   # S = auto-alert
+    LAUNCH_SCORE_A_TIER: int = 60   # A = alert if AI confirmation passes
+    LAUNCH_SCORE_B_TIER: int = 30   # B = watchlist only, no alert
+
+    # A fresh wallet is one whose on-chain age is <= this at time of funding
+    FRESH_WALLET_MAX_AGE_DAYS: int = 7
+    FRESH_WALLET_MAX_NONCE: int = 3
+    WHALE_FUNDING_MIN_USD: float = 50_000.0
+    WHALE_FRESH_DEPLOY_WINDOW_HOURS: int = 72
+
+    BIG_LP_MIN_USD: float = 50_000.0
+    INSIDER_EARLY_BUYER_BLOCK_WINDOW: int = 50  # blocks after pair creation
+    INSIDER_EARLY_BUYER_MIN_COUNT: int = 3       # ≥N known wallets in first N blocks
+
+    PORTFOLIO_GATE_MIN_USD: float = 1_000_000.0
+
+    # Exploit detection thresholds
+    EXPLOIT_TVL_DROP_PCT: float = 30.0       # >30% drop
+    EXPLOIT_TVL_DROP_MINUTES: int = 15       # in <15 minutes
+    EXPLOIT_TVL_MIN_PROTOCOL_USD: float = 50_000_000.0  # only for protocols >$50M
+    EXPLOIT_ABNORMAL_MINT_PCT: float = 5.0   # >5% of circulating in one tx
+    EXPLOIT_BRIDGE_DRAIN_MIN_USD: float = 10_000_000.0
+
+    # Scoring thresholds (legacy pump scanner — unchanged)
     ALERT_THRESHOLD: int = 70
     WATCHLIST_THRESHOLD: int = 50
     MAX_ALERTS_PER_DAY: int = 5
+    # Exploit alerts bypass MAX_ALERTS_PER_DAY (time-critical & rare).
+    MAX_EXPLOIT_ALERTS_PER_DAY: int = 10
 
     # Scanner intervals (minutes).
     # Cadences are tuned so the enrichment pipeline keeps up with the
     # ~580/hr raw-flag rate from the volume scanner.
     VOLUME_SCAN_INTERVAL: int = 15
-    PROFILE_CHECK_INTERVAL: int = 30   # was 60 — drains backlog faster
+    PROFILE_CHECK_INTERVAL: int = 30
     WALLET_ANALYZE_INTERVAL: int = 240
     EXCHANGE_FLOW_INTERVAL: int = 30
     SOCIAL_SCAN_INTERVAL: int = 120
     WALLET_TRACK_INTERVAL: int = 30
     SCORE_RECALC_INTERVAL: int = 30
+
+    # Phase 2: launch + exploit intervals
+    PAIR_WATCHER_INTERVAL_MIN: int = 5
+    DEPLOYER_WATCHER_INTERVAL_MIN: int = 10
+    WHALE_FRESH_WATCHER_INTERVAL_MIN: int = 10
+    TREASURY_OUTFLOW_INTERVAL_MIN: int = 30
+    LAUNCH_SCORER_INTERVAL_MIN: int = 2
+    EXPLOIT_WATCHER_INTERVAL_MIN: int = 3
 
     # Wallet tracker dust filter — skip token transfers whose USD value
     # cannot be estimated to be above this threshold.
