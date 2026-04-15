@@ -23,6 +23,7 @@ from backend.api.wallets import router as wallets_router
 from backend.api.alerts import router as alerts_router
 from backend.api.launches import router as launches_router
 from backend.api.exploits import router as exploits_router
+from backend.api.diagnostics import router as diagnostics_router
 
 # Configure logging
 logging.basicConfig(
@@ -137,6 +138,7 @@ app.include_router(wallets_router)
 app.include_router(alerts_router)
 app.include_router(launches_router)
 app.include_router(exploits_router)
+app.include_router(diagnostics_router)
 
 
 @app.get("/api/health")

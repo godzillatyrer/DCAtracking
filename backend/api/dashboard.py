@@ -321,6 +321,8 @@ def get_scan_log_summary(db: Session = Depends(get_db)):
         "launch_scorer", "exploit_watcher", "operator_graph",
         "bytecode_match", "portfolio_gate", "launchpad_watcher",
         "treasury_outflow",
+        # Phase 2 — seeders
+        "bridges_seeder", "golden_deployers_seeder",
     ]
     summary = []
     for job in jobs:
@@ -448,6 +450,184 @@ def _run_seeder_background():
 
 
 SEEDER_COOLDOWN_HOURS = 24
+
+
+def _run_bridges_seeder_background():
+    """Run scripts/seed_known_bridges.py from within the process."""
+    import logging
+    from datetime import datetime as _dt
+    from backend.database import SessionLocal as _SL
+    from backend.models.scan_log import ScanLog as _SL_LOG
+    from backend.models.exchange_wallet import ExchangeWallet as _EW
+
+    logger = logging.getLogger(__name__)
+    started = _dt.utcnow()
+    try:
+        # Import the seed data from the script module
+        import importlib.util, pathlib
+        script = pathlib.Path(__file__).resolve().parent.parent.parent / "scripts" / "seed_known_bridges.py"
+        spec = importlib.util.spec_from_file_location("seed_bridges", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        db = _SL()
+        added = 0
+        try:
+            for addr, name in mod.KNOWN_BRIDGES:
+                addr = addr.lower()
+                existing = db.query(_EW).filter_by(wallet_address=addr).first()
+                if existing:
+                    if existing.wallet_type != "bridge":
+                        existing.wallet_type = "bridge"
+                    if not existing.exchange_name:
+                        existing.exchange_name = name
+                    continue
+                row = _EW(
+                    wallet_address=addr,
+                    exchange_name=name,
+                    wallet_type="bridge",
+                    chain="bsc",
+                    verified=True,
+                    added_at=_dt.utcnow(),
+                )
+                db.add(row)
+                added += 1
+            db.commit()
+
+            entry = _SL_LOG(
+                job_name="bridges_seeder",
+                status="success",
+                tokens_flagged=added,
+                details=f"Seeded {added} bridge contracts ({len(mod.KNOWN_BRIDGES)} total in list).",
+                started_at=started,
+                finished_at=_dt.utcnow(),
+                duration_seconds=int((_dt.utcnow() - started).total_seconds()),
+            )
+            db.add(entry)
+            db.commit()
+        finally:
+            db.close()
+        logger.info(f"Bridges seeder: added {added} bridges")
+    except Exception as e:
+        logger.error(f"Bridges seeder failed: {e}")
+        db = _SL()
+        try:
+            db.add(_SL_LOG(
+                job_name="bridges_seeder", status="error",
+                error_message=str(e)[:500],
+                started_at=started, finished_at=_dt.utcnow(),
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+
+def _run_golden_deployers_seeder_background():
+    """Run scripts/seed_golden_deployers.py inside the worker."""
+    import asyncio as _asyncio
+    import logging
+    from datetime import datetime as _dt
+    from backend.database import SessionLocal as _SL
+    from backend.models.scan_log import ScanLog as _SL_LOG
+    from backend.models.known_wallet import KnownWallet as _KW
+
+    logger = logging.getLogger(__name__)
+    started = _dt.utcnow()
+    try:
+        # Import the script's async main()
+        import importlib.util, pathlib
+        script = pathlib.Path(__file__).resolve().parent.parent.parent / "scripts" / "seed_golden_deployers.py"
+        spec = importlib.util.spec_from_file_location("seed_gd", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _asyncio.run(mod.main())
+
+        db = _SL()
+        try:
+            total = db.query(_KW).filter(_KW.role == "golden_deployer").count()
+            db.add(_SL_LOG(
+                job_name="golden_deployers_seeder",
+                status="success",
+                tokens_flagged=total,
+                details=f"Seeded golden deployers. Table now holds {total} total.",
+                started_at=started,
+                finished_at=_dt.utcnow(),
+                duration_seconds=int((_dt.utcnow() - started).total_seconds()),
+            ))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Golden deployers seeder failed: {e}")
+        db = _SL()
+        try:
+            db.add(_SL_LOG(
+                job_name="golden_deployers_seeder", status="error",
+                error_message=str(e)[:500],
+                started_at=started, finished_at=_dt.utcnow(),
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+
+@router.post("/seed-bridges")
+def trigger_bridges_seed(
+    background_tasks: BackgroundTasks,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Seed BSC bridge contracts for Module 14 (exploit watcher)."""
+    from datetime import timedelta
+    recent = (
+        db.query(ScanLog)
+        .filter(
+            ScanLog.job_name == "bridges_seeder",
+            ScanLog.started_at >= datetime.utcnow() - timedelta(hours=SEEDER_COOLDOWN_HOURS),
+        )
+        .order_by(ScanLog.started_at.desc())
+        .first()
+    )
+    if recent and not force:
+        return {
+            "status": "skipped",
+            "message": f"Bridges seeder already ran at {recent.started_at.isoformat()}. "
+                       f"Pass force=true to re-run.",
+            "last_run": recent.started_at.isoformat(),
+        }
+    background_tasks.add_task(_run_bridges_seeder_background)
+    return {"status": "started", "message": "Bridges seeder running in background. Takes <10 seconds."}
+
+
+@router.post("/seed-golden-deployers")
+def trigger_golden_deployers_seed(
+    background_tasks: BackgroundTasks,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Seed the Module 1 golden-deployer watchlist from DeFi Llama + Arkham."""
+    from datetime import timedelta
+    recent = (
+        db.query(ScanLog)
+        .filter(
+            ScanLog.job_name == "golden_deployers_seeder",
+            ScanLog.started_at >= datetime.utcnow() - timedelta(hours=SEEDER_COOLDOWN_HOURS),
+        )
+        .order_by(ScanLog.started_at.desc())
+        .first()
+    )
+    if recent and not force:
+        return {
+            "status": "skipped",
+            "message": f"Golden deployers seeder already ran at {recent.started_at.isoformat()}. "
+                       f"Pass force=true to re-run.",
+            "last_run": recent.started_at.isoformat(),
+        }
+    background_tasks.add_task(_run_golden_deployers_seeder_background)
+    return {
+        "status": "started",
+        "message": "Golden deployers seeder running in background. Takes 5-15 minutes.",
+    }
 
 
 @router.post("/seed-wallets")
