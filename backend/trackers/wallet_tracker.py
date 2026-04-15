@@ -355,7 +355,19 @@ async def auto_flag_new_token(db: Session, token_contract: str, detected_via: st
 
 
 async def run_wallet_tracker():
-    """Main wallet tracker entry point. Called every 30-60 minutes."""
+    """
+    Main wallet tracker entry point. Called every 30 minutes.
+
+    Memory + time discipline: with 500+ known wallets and ~10 RPC calls
+    per wallet (getting tokentx + normal txs + per-transfer DEX Screener
+    meta lookups), scanning ALL wallets in one run easily exceeds the
+    30-min interval and OOMs the 2GB container. We process a random
+    subset of WALLET_TRACK_BATCH_SIZE wallets per run — over ~12 runs
+    (6 hours) we cover the full set with high probability.
+    """
+    import gc
+    import random as _random
+
     logger.info("Starting wallet tracker run...")
     db = SessionLocal()
     tracked_count = 0
@@ -363,19 +375,34 @@ async def run_wallet_tracker():
 
     try:
         # Load reference data
-        active_wallets = db.query(KnownWallet).filter(
+        total_active = db.query(KnownWallet).filter(
             KnownWallet.is_active.is_(True)
-        ).all()
+        ).count()
+
+        # Random subset per run; ORDER BY RANDOM() is slow on huge tables
+        # but known_wallets is <10k rows so it's fine.
+        from sqlalchemy import func as _sql_func
+        active_wallets = (
+            db.query(KnownWallet)
+            .filter(KnownWallet.is_active.is_(True))
+            .order_by(_sql_func.random())
+            .limit(settings.WALLET_TRACK_BATCH_SIZE)
+            .all()
+        )
         exchange_addresses = {
             w.wallet_address.lower()
             for w in db.query(ExchangeWallet).all()
         }
+        # `known_addresses` is used to label intra-cluster transfers as
+        # "Known wallet" — needs the full set, not just the batch
         known_addresses = {
             w.wallet_address.lower()
-            for w in active_wallets
+            for w in db.query(KnownWallet).filter(KnownWallet.is_active.is_(True)).all()
         }
 
-        logger.info(f"Tracking {len(active_wallets)} known wallets")
+        logger.info(
+            f"Tracking {len(active_wallets)} of {total_active} known wallets this run"
+        )
 
         for wallet in active_wallets:
             try:
@@ -411,6 +438,10 @@ async def run_wallet_tracker():
             except Exception as e:
                 logger.error(f"Error tracking wallet {wallet.wallet_address}: {e}")
                 continue
+            finally:
+                # Free per-wallet RPC response objects before the next wallet
+                # so memory doesn't accumulate across the batch.
+                gc.collect()
 
         logger.info(
             f"Wallet tracker complete. Tracked {tracked_count} wallets, "
