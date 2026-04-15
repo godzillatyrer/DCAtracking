@@ -31,6 +31,11 @@ const JOB_LABELS = {
   portfolio_gate:    { label: 'Portfolio Gate',    icon: '~1h',  desc: 'Filter: deployer holds >$1M in assets (M8)' },
   launchpad_watcher: { label: 'Launchpad Watcher', icon: '~30m', desc: 'Known wallets receiving launchpad allocations (M12)' },
   treasury_outflow:  { label: 'Treasury Outflow',  icon: '~30m', desc: 'Treasury/multisig outflows to fresh wallets (M13)' },
+  // Phase 3 — Solana detection
+  solana_pair_watcher:     { label: 'Solana Pair Watcher',     icon: '~7m',  desc: 'New Raydium/Pump.fun pools + Solana insider buyer cluster' },
+  solana_deployer_watcher: { label: 'Solana Deployer Watcher', icon: '~12m', desc: 'New SPL mints — matches mint authority against known operators' },
+  solana_whale_fresh:      { label: 'Solana Whale→Fresh',      icon: '~12m', desc: 'Solana whale SOL transfers to fresh wallets (TRUMP pattern, M3)' },
+  solana_seeder:           { label: 'Solana Seeder',           icon: 'manual', desc: 'Seeds public Solana infrastructure rows + provides chain bootstrap' },
 };
 
 function statusBadge(status) {

@@ -7,6 +7,7 @@ import AlertLog from './components/AlertLog';
 import ScanActivity from './components/ScanActivity';
 import Launches from './components/Launches';
 import Exploits from './components/Exploits';
+import APIStatus from './components/APIStatus';
 
 const navStyle = {
   display: 'flex',
@@ -58,6 +59,9 @@ function App() {
           <NavLink to="/activity" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
             Scanner Activity
           </NavLink>
+          <NavLink to="/api-status" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+            API Status
+          </NavLink>
         </nav>
         <div style={{ padding: '24px' }}>
           <Routes>
@@ -68,6 +72,7 @@ function App() {
             <Route path="/wallets" element={<WalletTracker />} />
             <Route path="/alerts" element={<AlertLog />} />
             <Route path="/activity" element={<ScanActivity />} />
+            <Route path="/api-status" element={<APIStatus />} />
           </Routes>
         </div>
       </div>

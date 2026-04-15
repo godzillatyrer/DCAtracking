@@ -194,8 +194,15 @@ async def recompute_candidate(db: Session, cand: LaunchCandidate) -> None:
     signals = _load_signals(db, cand.chain, cand.contract_address)
     tier, score = _pick_tier(signals)
 
-    # Build a summary { signal_type: confidence } for the UI + AI briefing
-    summary = {}
+    # Rebuild the public { signal_type: confidence } summary from current
+    # signals. We deliberately PRESERVE any '__'-prefixed keys — those are
+    # private state that other modules (e.g. exploit_watcher's Solana
+    # abnormal-mint baseline) write to signal_summary and need to persist
+    # across recomputes.
+    preserved_private = {
+        k: v for k, v in (cand.signal_summary or {}).items() if isinstance(k, str) and k.startswith("__")
+    }
+    summary = dict(preserved_private)
     for s in signals:
         prev = summary.get(s.signal_type)
         if prev is None or s.confidence > prev:
@@ -205,19 +212,15 @@ async def recompute_candidate(db: Session, cand: LaunchCandidate) -> None:
     cand.alert_tier = tier
     cand.signal_summary = summary
 
-    # Check if we should alert
+    # Alert gating:
+    #   alert_fired is a one-way flag — once True, this candidate never
+    #   re-alerts. That permanent dedup is intentional ("no noise") and is
+    #   the ONLY dedup we apply. We do NOT add a time-window dedup query
+    #   here because the unique (chain, contract_address) constraint means
+    #   only one row exists per contract — a same-contract time-window
+    #   query would always return the same row and never resolve.
     if not cand.alert_fired:
         should_alert = tier == "S" or tier == "A"
-        if should_alert:
-            recent = db.query(LaunchCandidate).filter(
-                LaunchCandidate.contract_address == cand.contract_address,
-                LaunchCandidate.chain == cand.chain,
-                LaunchCandidate.alert_fired.is_(True),
-                LaunchCandidate.alert_fired_at >= datetime.utcnow() - timedelta(hours=ALERT_DEDUP_HOURS),
-            ).first()
-            if recent:
-                should_alert = False
-
         if should_alert:
             # Import here to avoid circular import
             from backend.alerts.launch_alert import fire_launch_alert
