@@ -8,8 +8,15 @@ Nansen API surface (per docs.nansen.ai as of 2026):
                (the /api/beta namespace was deprecated 2025-10-01)
   - Auth:      `apikey` header (lowercase) with the raw key value
   - Transport: **POST with JSON body** for every data endpoint.
-               GETs return 404 because that method is not routed —
-               this is why earlier GET probes universally 404'd.
+               GETs return 404 because that method is not routed.
+
+Credit metering:
+  Nansen bills per call (observed: /smart-money/holdings = 5 credits).
+  To avoid accidentally draining the user's balance via diagnostic
+  probes or a runaway job, THIS CLIENT enforces a hard daily call cap
+  (settings.NANSEN_DAILY_CALL_CAP). Once hit, further calls short-
+  circuit to None and log one warning. Counter resets at UTC midnight.
+  Inspect via `nansen.calls_today` / `nansen.cap_hit`.
 
 Docs:
   https://docs.nansen.ai/getting-started/api-structure-and-base-url
@@ -20,6 +27,7 @@ Rate limits: 20 req/s, 500 req/min (well above our usage).
 
 import asyncio
 import logging
+from datetime import datetime, date
 from typing import Any
 
 import httpx
@@ -33,10 +41,38 @@ class NansenClient:
     def __init__(self):
         self.base = settings.NANSEN_BASE_URL.rstrip("/")
         self.key = settings.NANSEN_API_KEY
+        # In-process credit-aware call counter.
+        self._counter_date: date = datetime.utcnow().date()
+        self._calls_today: int = 0
+        self._cap_hit_logged_today: bool = False
+        # Timestamp of the last successful 200 — lets diagnostics show
+        # "last verified X ago" without re-probing on every audit.
+        self._last_success_at: datetime | None = None
 
     @property
     def configured(self) -> bool:
         return bool(self.key)
+
+    def _rollover_counter_if_needed(self) -> None:
+        today = datetime.utcnow().date()
+        if today != self._counter_date:
+            self._counter_date = today
+            self._calls_today = 0
+            self._cap_hit_logged_today = False
+
+    @property
+    def calls_today(self) -> int:
+        self._rollover_counter_if_needed()
+        return self._calls_today
+
+    @property
+    def cap_hit(self) -> bool:
+        self._rollover_counter_if_needed()
+        return self._calls_today >= settings.NANSEN_DAILY_CALL_CAP
+
+    @property
+    def last_success_at(self) -> datetime | None:
+        return self._last_success_at
 
     def _headers(self) -> dict:
         return {
@@ -46,15 +82,36 @@ class NansenClient:
         }
 
     async def _post(self, path: str, body: dict | None = None) -> Any | None:
-        """POST to a Nansen endpoint. Returns parsed JSON or None on error."""
+        """POST to a Nansen endpoint. Returns parsed JSON or None on error.
+
+        Enforces NANSEN_DAILY_CALL_CAP — calls past the cap are skipped
+        with a single warning per day. This is the primary guard against
+        credit-balance drain from bugs or accidentally-aggressive jobs.
+        """
         if not self.configured:
             return None
+        self._rollover_counter_if_needed()
+        if self._calls_today >= settings.NANSEN_DAILY_CALL_CAP:
+            if not self._cap_hit_logged_today:
+                logger.warning(
+                    f"Nansen daily call cap ({settings.NANSEN_DAILY_CALL_CAP}) "
+                    f"reached — skipping further calls until UTC midnight. "
+                    f"Tune via NANSEN_DAILY_CALL_CAP env."
+                )
+                self._cap_hit_logged_today = True
+            return None
+
         url = f"{self.base}{path}"
+        # Increment BEFORE the request so retries / concurrent calls
+        # don't blow past the cap under load.
+        self._calls_today += 1
+
         try:
             async with httpx.AsyncClient(timeout=25) as client:
                 resp = await client.post(url, headers=self._headers(), json=body or {})
                 await asyncio.sleep(0.05)
                 if resp.status_code == 200:
+                    self._last_success_at = datetime.utcnow()
                     return resp.json()
                 if resp.status_code in (401, 403):
                     logger.warning(f"Nansen {path} -> {resp.status_code} (auth/plan)")

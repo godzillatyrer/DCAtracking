@@ -214,6 +214,19 @@ function APIRow({ api }) {
           <div style={{ marginBottom: '6px' }}>
             <span style={{ color: '#666' }}>Role: </span>{api.role}
           </div>
+          {api.calls_today != null && (
+            <div style={{
+              color: '#ffcc44',
+              fontSize: '11px',
+              marginBottom: '6px',
+              fontFamily: 'monospace',
+            }}>
+              Credits: {api.calls_today} calls today
+              {api.last_success_at && (
+                <> · last 200: {formatDate(api.last_success_at)}</>
+              )}
+            </div>
+          )}
           {api.error && (
             <div style={{ color: '#ff8888', marginBottom: '6px' }}>
               <b>Live error:</b> {api.error}

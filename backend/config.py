@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     # JSON body and require the lowercase `apikey` header.
     # Docs: https://docs.nansen.ai/getting-started/api-structure-and-base-url
     NANSEN_BASE_URL: str = "https://api.nansen.ai/api/v1"
+    # Nansen is credit-metered (observed: /smart-money/holdings = 5
+    # credits/call). We self-limit to NANSEN_DAILY_CALL_CAP total Nansen
+    # requests per calendar day so accidental bursts / diagnostic probes
+    # can't drain the credit balance. The client refuses further calls
+    # past the cap and logs the cap-hit — the watchers degrade to
+    # "Arkham-only" gracefully.
+    NANSEN_DAILY_CALL_CAP: int = 200
 
     # GMGN (Solana smart money tracker)
     GMGN_API_KEY: str = ""

@@ -27,7 +27,11 @@ from backend.models.wallet_portfolio import WalletPortfolio
 
 logger = logging.getLogger(__name__)
 
-CACHE_FRESHNESS_HOURS = 24
+# Nansen is credit-metered (~5 credits/call observed). A deployer's
+# portfolio doesn't change materially day-to-day, so we cache results
+# for a week to keep the total Nansen call volume from this module
+# under a few dozen per day even with aggressive deployer detection.
+CACHE_FRESHNESS_HOURS = 24 * 7  # 1 week
 
 
 async def _portfolio_usd(db: Session, chain: str, addr: str) -> float | None:
