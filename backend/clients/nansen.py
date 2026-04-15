@@ -1,6 +1,6 @@
 """Nansen client — Smart Money labels + insider tracking.
 
-Paid API (~$150/mo Standard tier at nansen.ai). If NANSEN_API_KEY is
+Paid API (pricing varies by tier — see nansen.ai). If NANSEN_API_KEY is
 unset, every method returns None/[] and dependent modules log-and-skip.
 
 Nansen API surface (per docs.nansen.ai as of 2026):

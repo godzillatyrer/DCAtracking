@@ -59,6 +59,14 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENT_JOBS = 2
 _JOB_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
+# Hard per-job timeout. Any single run that exceeds this gets cancelled
+# so the semaphore is released and subsequent runs proceed normally.
+# Without this, one hung job (e.g. an RPC that never returns) would hold
+# one of the 2 semaphore slots forever, cause the next N scheduled runs
+# to misfire past the 30-min grace, and eventually take the whole
+# pipeline silent — the stale_1h+ pattern we've seen in the audit.
+JOB_TIMEOUT_SECONDS = 8 * 60  # 8 min — longer than any legitimate run
+
 
 def log_scan(job_name: str, status: str, tokens_checked: int = 0,
              tokens_flagged: int = 0, details: str = "", error_message: str = "",
@@ -336,7 +344,9 @@ def _wrap_launch_job(job_name: str, coro):
     """
     Wrap a detection coroutine with:
       - semaphore-bounded concurrency (max 2 jobs running at once)
-      - scan_log entry on success/error
+      - hard per-job timeout (JOB_TIMEOUT_SECONDS) so a hung RPC/query
+        can never hold the semaphore longer than one normal run
+      - scan_log entry on success/error/timeout
       - gc.collect() after each run so large transient lists (RPC log
         responses, balance dicts, etc.) get freed before the next job
         kicks off — critical on the 2GB Render container.
@@ -345,10 +355,19 @@ def _wrap_launch_job(job_name: str, coro):
         async with _JOB_SEMAPHORE:
             started = datetime.utcnow()
             try:
-                result = await coro()
+                result = await asyncio.wait_for(coro(), timeout=JOB_TIMEOUT_SECONDS)
                 details = str(result) if result is not None else "ok"
                 log_scan(
                     job_name, "success", details=details,
+                    started_at=started, finished_at=datetime.utcnow(),
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"{job_name} timed out after {JOB_TIMEOUT_SECONDS}s — cancelled"
+                )
+                log_scan(
+                    job_name, "error",
+                    error_message=f"timeout after {JOB_TIMEOUT_SECONDS}s (see scheduler.JOB_TIMEOUT_SECONDS)",
                     started_at=started, finished_at=datetime.utcnow(),
                 )
             except Exception as e:
@@ -365,15 +384,20 @@ def _wrap_launch_job(job_name: str, coro):
 
 def _wrap_legacy_job(fn):
     """
-    Apply the same semaphore+gc discipline to the legacy job functions
-    (volume_scanner, profile_checker, wallet_analyzer, etc.) without
-    rewriting their bodies. They already do their own scan_log writes,
-    so we just guard concurrency + force gc afterwards.
+    Apply the same semaphore + timeout + gc discipline to the legacy
+    job functions (volume_scanner, profile_checker, wallet_analyzer,
+    etc.) without rewriting their bodies. They already do their own
+    scan_log writes internally, so here we just guard concurrency,
+    enforce the hard timeout, and force gc afterwards.
     """
     async def _wrapped():
         async with _JOB_SEMAPHORE:
             try:
-                await fn()
+                await asyncio.wait_for(fn(), timeout=JOB_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"{fn.__name__} timed out after {JOB_TIMEOUT_SECONDS}s — cancelled"
+                )
             finally:
                 gc.collect()
     _wrapped.__name__ = fn.__name__ + "_throttled"
