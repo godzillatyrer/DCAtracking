@@ -5,6 +5,8 @@ import TokenDetail from './components/TokenDetail';
 import WalletTracker from './components/WalletTracker';
 import AlertLog from './components/AlertLog';
 import ScanActivity from './components/ScanActivity';
+import Launches from './components/Launches';
+import Exploits from './components/Exploits';
 
 const navStyle = {
   display: 'flex',
@@ -41,6 +43,12 @@ function App() {
           <NavLink to="/" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle} end>
             Dashboard
           </NavLink>
+          <NavLink to="/launches" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+            Launches
+          </NavLink>
+          <NavLink to="/exploits" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+            Exploits
+          </NavLink>
           <NavLink to="/wallets" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
             Wallet Tracker
           </NavLink>
@@ -54,6 +62,8 @@ function App() {
         <div style={{ padding: '24px' }}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/launches" element={<Launches />} />
+            <Route path="/exploits" element={<Exploits />} />
             <Route path="/token/:address" element={<TokenDetail />} />
             <Route path="/wallets" element={<WalletTracker />} />
             <Route path="/alerts" element={<AlertLog />} />

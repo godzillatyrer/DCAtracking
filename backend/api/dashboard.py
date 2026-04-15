@@ -316,6 +316,11 @@ def get_scan_log_summary(db: Session = Depends(get_db)):
         "volume_scanner", "profile_checker", "wallet_analyzer",
         "exchange_flow", "social_scanner", "wallet_tracker", "scorer", "cleanup",
         "wallet_seeder",
+        # Phase 2 — launch + exploit detection
+        "pair_watcher", "deployer_watcher", "whale_fresh_watcher",
+        "launch_scorer", "exploit_watcher", "operator_graph",
+        "bytecode_match", "portfolio_gate", "launchpad_watcher",
+        "treasury_outflow",
     ]
     summary = []
     for job in jobs:
