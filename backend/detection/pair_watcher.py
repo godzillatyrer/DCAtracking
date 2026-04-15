@@ -72,11 +72,20 @@ def _extract_pair_meta(pool: dict) -> dict | None:
                 created_at = datetime.fromisoformat(pool_created.replace("Z", "+00:00"))
             except Exception:
                 pass
+        # GeckoTerminal pool name is "BASE / QUOTE" (e.g. "RAVE / WBNB").
+        # We split on the slash to recover the base symbol — without this
+        # the Launches dashboard renders "—" for every detected token.
+        pool_name = attrs.get("name") or ""
+        base_symbol = None
+        if "/" in pool_name:
+            base_symbol = pool_name.split("/", 1)[0].strip() or None
         return {
             "dex": (attrs.get("dex") or {}).get("name") if isinstance(attrs.get("dex"), dict) else attrs.get("dex_id"),
             "pair_address": (attrs.get("address") or "").lower(),
             "base_token": base_addr.lower(),
             "quote_token": quote_addr.lower(),
+            "base_symbol": base_symbol,
+            "pool_name": pool_name or None,
             "initial_lp_usd": lp_usd,
             "created_at": created_at,
         }
@@ -169,6 +178,14 @@ async def _process_new_pair(db: Session, meta: dict, known: dict[str, KnownWalle
         db.commit()
         existing = row
 
+    # Common token-symbol/name kwargs propagated to every signal so the
+    # LaunchCandidate row gets populated on its FIRST signal (record_signal
+    # only writes these fields when they're currently None on the row).
+    sym_kwargs = {
+        "token_symbol": meta.get("base_symbol"),
+        "token_name": meta.get("pool_name"),
+    }
+
     # Module 4: Big Initial LP (filter tier)
     lp_usd = float(existing.initial_lp_usd or 0)
     if lp_usd >= settings.BIG_LP_MIN_USD:
@@ -182,6 +199,7 @@ async def _process_new_pair(db: Session, meta: dict, known: dict[str, KnownWalle
             evidence={"pair": pair_addr, "initial_lp_usd": lp_usd},
             description=f"Initial LP ${lp_usd:,.0f} on {meta.get('dex') or 'BSC DEX'}.",
             initial_lp_usd=lp_usd,
+            **sym_kwargs,
         )
 
     # Module 9: Known LP Provider (high tier)
@@ -206,6 +224,7 @@ async def _process_new_pair(db: Session, meta: dict, known: dict[str, KnownWalle
                 "pair": pair_addr,
             },
             description=f"Initial LP seeded by known operator: {kw.label}",
+            **sym_kwargs,
         )
 
     # Module 5: Insider Early-Buyer Cluster (high tier)
@@ -233,6 +252,7 @@ async def _process_new_pair(db: Session, meta: dict, known: dict[str, KnownWalle
                     f"{len(known_buyers)} labeled wallets appear in the first "
                     f"{settings.INSIDER_EARLY_BUYER_BLOCK_WINDOW} blocks."
                 ),
+                **sym_kwargs,
             )
         db.commit()
 

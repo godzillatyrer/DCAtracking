@@ -59,11 +59,20 @@ def _extract_meta(pool: dict) -> dict | None:
                 created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
             except Exception:
                 pass
+        # GeckoTerminal pool name on Solana is "BASE / QUOTE" (e.g.
+        # "WIF / SOL"). Split to recover the base symbol so the Launches
+        # dashboard renders something better than "—".
+        pool_name = attrs.get("name") or ""
+        base_symbol = None
+        if "/" in pool_name:
+            base_symbol = pool_name.split("/", 1)[0].strip() or None
         return {
             "dex": (attrs.get("dex") or {}).get("name") if isinstance(attrs.get("dex"), dict) else attrs.get("dex_id"),
             "pair_address": attrs.get("address") or "",
             "base_token": base_addr,
             "quote_token": quote_addr,
+            "base_symbol": base_symbol,
+            "pool_name": pool_name or None,
             "initial_lp_usd": lp_usd,
             "created_at": created_dt,
         }
@@ -134,6 +143,10 @@ async def _process_pool(db: Session, meta: dict, known: dict[str, SolanaKnownWal
         existing = row
 
     lp_usd = float(existing.initial_lp_usd or 0)
+    sym_kwargs = {
+        "token_symbol": meta.get("base_symbol"),
+        "token_name": meta.get("pool_name"),
+    }
 
     # Module 4: Big Initial LP (FILTER)
     if lp_usd >= settings.BIG_LP_MIN_USD:
@@ -147,6 +160,7 @@ async def _process_pool(db: Session, meta: dict, known: dict[str, SolanaKnownWal
             evidence={"pair": pair_addr, "initial_lp_usd": lp_usd},
             description=f"Solana pool initial LP ${lp_usd:,.0f} on {meta.get('dex') or 'DEX'}.",
             initial_lp_usd=lp_usd,
+            **sym_kwargs,
         )
 
     # Module 9: Known LP Provider (HIGH)
@@ -171,6 +185,7 @@ async def _process_pool(db: Session, meta: dict, known: dict[str, SolanaKnownWal
                 "pair": pair_addr,
             },
             description=f"Solana pool LP seeded by known operator: {kw.label}",
+            **sym_kwargs,
         )
 
     # Module 5: Insider Early-Buyer Cluster (HIGH)
@@ -209,6 +224,7 @@ async def _process_pool(db: Session, meta: dict, known: dict[str, SolanaKnownWal
                     f"{len(known_buyers)} labeled Solana operators among "
                     f"the smart-money buyers of this token."
                 ),
+                **sym_kwargs,
             )
         db.commit()
 
