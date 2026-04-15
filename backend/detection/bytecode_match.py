@@ -48,15 +48,26 @@ def _hash_code(code_hex: str) -> str:
     return hashlib.sha256(code.encode("ascii")).hexdigest()
 
 
-def _similarity(a: str, b: str, chunk: int = 16) -> float:
-    """Rough chunk-overlap similarity. Good enough for template detection."""
+def _similarity(a: str, b: str) -> float:
+    """
+    Cheap similarity: 1.0 if lengths match and first/last 512 chars match
+    (strong heuristic that it's the same solc template), 0.5 if just the
+    lengths match, 0.0 otherwise.
+
+    Replaced the previous set-of-chunks Jaccard because that was building
+    ~100MB of Python sets per scoring pass and contributing to OOMs.
+    """
     if not a or not b:
         return 0.0
-    set_a = {a[i:i + chunk] for i in range(0, len(a), chunk)}
-    set_b = {b[i:i + chunk] for i in range(0, len(b), chunk)}
-    if not set_a or not set_b:
-        return 0.0
-    return len(set_a & set_b) / max(len(set_a), len(set_b))
+    if len(a) == len(b):
+        head_match = a[:512] == b[:512]
+        tail_match = a[-512:] == b[-512:]
+        if head_match and tail_match:
+            return 1.0
+        if head_match or tail_match:
+            return 0.75
+        return 0.5
+    return 0.0
 
 
 async def _get_code(addr: str) -> str | None:
@@ -102,11 +113,21 @@ async def run_bytecode_match():
     try:
         await _ensure_references_cached(db)
 
-        # Only look at recent, yet-unhashed candidates
+        # Only look at recent, yet-unhashed candidates — 10 per run to keep
+        # peak memory bounded (each eth_getCode can return 100KB+ of hex).
         recent = db.query(LaunchCandidate).filter(
             LaunchCandidate.chain == "bsc",
             LaunchCandidate.status != "expired",
-        ).order_by(LaunchCandidate.detected_at.desc()).limit(30).all()
+        ).order_by(LaunchCandidate.detected_at.desc()).limit(10).all()
+
+        # Cache reference bytecode once per run so we don't re-fetch 5 × 10
+        # contracts worth of large hex strings.
+        ref_codes: dict[str, str] = {}
+        for label, ref_addr in REFERENCE_CONTRACTS.items():
+            code = await _get_code(ref_addr)
+            if code:
+                ref_codes[label] = code
+
         for cand in recent:
             addr = cand.contract_address
             if addr.startswith("pending:"):
@@ -120,14 +141,11 @@ async def run_bytecode_match():
             if not code:
                 continue
             code_hash = _hash_code(code)
+            code_length = len(code)
 
             best_label = None
             best_score = 0.0
-            # Exact hash match = 1.0
-            for label, ref_addr in REFERENCE_CONTRACTS.items():
-                ref_code = await _get_code(ref_addr)
-                if not ref_code:
-                    continue
+            for label, ref_code in ref_codes.items():
                 score = (
                     1.0 if _hash_code(ref_code) == code_hash
                     else _similarity(code, ref_code)
@@ -135,16 +153,18 @@ async def run_bytecode_match():
                 if score > best_score:
                     best_score = score
                     best_label = label
+            # Drop the large hex string for this candidate before moving on
+            del code
 
             row = existing or ContractBytecode(
                 chain="bsc",
                 contract_address=addr,
                 code_hash=code_hash,
-                code_length=len(code),
+                code_length=code_length,
                 detected_at=datetime.utcnow(),
             )
             row.code_hash = code_hash
-            row.code_length = len(code)
+            row.code_length = code_length
             row.best_match_label = best_label
             row.best_match_similarity = Decimal(str(round(best_score, 3)))
             if existing is None:

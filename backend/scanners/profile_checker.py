@@ -25,9 +25,11 @@ from backend.models.token_profile import TokenProfile
 
 logger = logging.getLogger(__name__)
 
-# Max tokens to enrich per run. Each enrichment makes ~5 RPC calls + several
-# log scans, so the batch must stay small enough to finish within the run window.
-DEFAULT_BATCH_SIZE = 50
+# Max tokens to enrich per run. Each enrichment makes ~5 RPC calls and
+# can return large hex blobs (contract source). We keep this conservative
+# so it composes cleanly with other concurrently-running scanners on the
+# memory-constrained Render container.
+DEFAULT_BATCH_SIZE = 25
 
 # Narrative keywords for classification
 NARRATIVE_KEYWORDS = {

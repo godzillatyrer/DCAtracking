@@ -1,8 +1,16 @@
 """
 APScheduler job definitions — orchestrates all scanner and tracker jobs.
 Every job run is logged to the scan_logs table for observability.
+
+Memory management: the in-process scheduler runs 18+ jobs on a single
+2GB Render container. Without limits, staggered first-runs caused all
+jobs to fire within ~20 minutes of boot and OOM the container. We use
+a module-level asyncio.Semaphore to cap concurrent job execution to
+MAX_CONCURRENT_JOBS (default 2) and stagger first-runs over ~60 min.
 """
 
+import asyncio
+import gc
 import logging
 from datetime import datetime, timedelta
 
@@ -36,6 +44,15 @@ from backend.detection.launchpad_watcher import run_launchpad_watcher
 from backend.detection.treasury_outflow import run_treasury_outflow
 
 logger = logging.getLogger(__name__)
+
+
+# At most this many jobs may run concurrently. Even though APScheduler's
+# AsyncIOScheduler runs everything in one event loop, parallel jobs each
+# accumulate Python objects (RPC results, ORM rows, log lists). 2GB
+# container OOMs were the result of 5-6 jobs firing simultaneously after
+# their staggered first-runs all elapsed in the same 20-min window.
+MAX_CONCURRENT_JOBS = 2
+_JOB_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
 
 def log_scan(job_name: str, status: str, tokens_checked: int = 0,
@@ -311,23 +328,50 @@ async def run_cleanup_job():
 # ─── Phase 2: launch + exploit detection job wrappers ─────────────────
 
 def _wrap_launch_job(job_name: str, coro):
-    """Generic wrapper that logs start/finish and catches exceptions."""
+    """
+    Wrap a detection coroutine with:
+      - semaphore-bounded concurrency (max 2 jobs running at once)
+      - scan_log entry on success/error
+      - gc.collect() after each run so large transient lists (RPC log
+        responses, balance dicts, etc.) get freed before the next job
+        kicks off — critical on the 2GB Render container.
+    """
     async def _wrapped():
-        started = datetime.utcnow()
-        try:
-            result = await coro()
-            details = str(result) if result is not None else "ok"
-            log_scan(
-                job_name, "success", details=details,
-                started_at=started, finished_at=datetime.utcnow(),
-            )
-        except Exception as e:
-            logger.error(f"{job_name} failed: {e}")
-            log_scan(
-                job_name, "error", error_message=str(e),
-                started_at=started, finished_at=datetime.utcnow(),
-            )
+        async with _JOB_SEMAPHORE:
+            started = datetime.utcnow()
+            try:
+                result = await coro()
+                details = str(result) if result is not None else "ok"
+                log_scan(
+                    job_name, "success", details=details,
+                    started_at=started, finished_at=datetime.utcnow(),
+                )
+            except Exception as e:
+                logger.error(f"{job_name} failed: {e}")
+                log_scan(
+                    job_name, "error", error_message=str(e),
+                    started_at=started, finished_at=datetime.utcnow(),
+                )
+            finally:
+                gc.collect()
     _wrapped.__name__ = f"run_{job_name}_job"
+    return _wrapped
+
+
+def _wrap_legacy_job(fn):
+    """
+    Apply the same semaphore+gc discipline to the legacy job functions
+    (volume_scanner, profile_checker, wallet_analyzer, etc.) without
+    rewriting their bodies. They already do their own scan_log writes,
+    so we just guard concurrency + force gc afterwards.
+    """
+    async def _wrapped():
+        async with _JOB_SEMAPHORE:
+            try:
+                await fn()
+            finally:
+                gc.collect()
+    _wrapped.__name__ = fn.__name__ + "_throttled"
     return _wrapped
 
 
@@ -347,170 +391,67 @@ def setup_scheduler() -> AsyncIOScheduler:
     """
     Configure and return the APScheduler instance.
 
-    Render redeploys reset the in-process scheduler. To avoid 4-hour and 24-hour
-    jobs never firing between deploys, we stagger an immediate first run for
-    every job (using next_run_time with small offsets). max_instances=1 prevents
-    overlapping runs of the same job; misfire_grace_time keeps catch-up sane.
+    Memory + concurrency design:
+      - Every job runs through _wrap_legacy_job / _wrap_launch_job which
+        share a module-level Semaphore — at most MAX_CONCURRENT_JOBS run
+        at the same time. This is the primary OOM mitigation.
+      - First-run offsets are spread across ~75 minutes (rather than
+        ~20 min) and ordered so the heaviest jobs never overlap their
+        first runs with each other.
+      - misfire_grace_time is generous so that backed-up jobs simply
+        coalesce instead of stacking up after a long pause.
     """
     scheduler = AsyncIOScheduler(job_defaults={
         "max_instances": 1,
         "coalesce": True,
-        "misfire_grace_time": 60 * 30,  # 30 min grace for missed runs
+        "misfire_grace_time": 60 * 30,
     })
 
     now = datetime.utcnow()
+    M = lambda mins: now + timedelta(minutes=mins)  # noqa: E731
 
-    # Step 1: Volume scanner — every 15 minutes (first run: ~30s after boot)
-    scheduler.add_job(
-        run_volume_scanner_job, "interval",
-        minutes=settings.VOLUME_SCAN_INTERVAL,
-        id="volume_scanner", name="Volume Scanner",
-        next_run_time=now + timedelta(seconds=30),
-    )
+    # All registrations as (id, name, callable, trigger_kwargs, first_run_offset_min).
+    # Offsets are tuned so the heaviest jobs (volume_scanner, wallet_analyzer,
+    # bytecode_match, exploit_watcher) don't first-fire in the same window.
+    jobs = [
+        # Light / fast jobs first — these are cheap to run early
+        ("launch_scorer",     "Launch Scorer",           run_launch_scorer_job,     {"minutes": settings.LAUNCH_SCORER_INTERVAL_MIN},        4),
+        ("wallet_tracker",    "Wallet Tracker",          _wrap_legacy_job(run_wallet_tracker_job),    {"minutes": settings.WALLET_TRACK_INTERVAL},  6),
+        ("pair_watcher",      "Pair Watcher",            run_pair_watcher_job,      {"minutes": settings.PAIR_WATCHER_INTERVAL_MIN},        8),
+        ("treasury_outflow",  "Treasury Outflow",        run_treasury_outflow_job,  {"minutes": settings.TREASURY_OUTFLOW_INTERVAL_MIN},   12),
 
-    # Step 2: Profile checker — every PROFILE_CHECK_INTERVAL min (first run: 2 min)
-    scheduler.add_job(
-        run_profile_checker_job, "interval",
-        minutes=settings.PROFILE_CHECK_INTERVAL,
-        id="profile_checker", name="Profile Checker",
-        next_run_time=now + timedelta(minutes=2),
-    )
+        # Medium jobs — RPC-heavy but bounded
+        ("volume_scanner",    "Volume Scanner",          _wrap_legacy_job(run_volume_scanner_job),    {"minutes": settings.VOLUME_SCAN_INTERVAL},   2),
+        ("scorer",            "Score Recalculator",      _wrap_legacy_job(run_scorer_job),            {"minutes": settings.SCORE_RECALC_INTERVAL}, 14),
+        ("profile_checker",   "Profile Checker",         _wrap_legacy_job(run_profile_checker_job),   {"minutes": settings.PROFILE_CHECK_INTERVAL}, 16),
+        ("exchange_flow",     "Exchange Flow Monitor",   _wrap_legacy_job(run_exchange_flow_job),     {"minutes": settings.EXCHANGE_FLOW_INTERVAL}, 18),
+        ("deployer_watcher",  "Golden Deployer Watcher", run_deployer_watcher_job,  {"minutes": settings.DEPLOYER_WATCHER_INTERVAL_MIN},   20),
+        ("whale_fresh_watcher", "Whale→Fresh Funding",   run_whale_fresh_job,       {"minutes": settings.WHALE_FRESH_WATCHER_INTERVAL_MIN}, 25),
 
-    # Step 3: Wallet analyzer — every 4 hours (first run: 5 min after boot)
-    # Without an immediate first run, this never fires between Render redeploys.
-    scheduler.add_job(
-        run_wallet_analyzer_job, "interval",
-        minutes=settings.WALLET_ANALYZE_INTERVAL,
-        id="wallet_analyzer", name="Wallet Analyzer",
-        next_run_time=now + timedelta(minutes=5),
-    )
+        # Heavy jobs — pushed to later first-runs so they don't pile up at boot
+        ("operator_graph",    "Operator Graph",          run_operator_graph_job,    {"minutes": 15}, 30),
+        ("launchpad_watcher", "Launchpad Watcher",       run_launchpad_watcher_job, {"minutes": 30}, 35),
+        ("exploit_watcher",   "Exploit Watcher",         run_exploit_watcher_job,   {"minutes": settings.EXPLOIT_WATCHER_INTERVAL_MIN},   40),
+        ("social_scanner",    "Social Scanner",          _wrap_legacy_job(run_social_scanner_job),    {"minutes": settings.SOCIAL_SCAN_INTERVAL},  45),
+        ("portfolio_gate",    "Portfolio Gate",          run_portfolio_gate_job,    {"minutes": 60}, 50),
+        ("bytecode_match",    "Bytecode Fingerprint",    run_bytecode_match_job,    {"minutes": 30}, 55),
+        ("wallet_analyzer",   "Wallet Analyzer",         _wrap_legacy_job(run_wallet_analyzer_job),   {"minutes": settings.WALLET_ANALYZE_INTERVAL}, 65),
+        ("cleanup",           "Cleanup",                 _wrap_legacy_job(run_cleanup_job),           {"hours": 6}, 75),
+    ]
 
-    # Step 4: Exchange flow monitor — every 30 min (first run: 3 min)
-    scheduler.add_job(
-        run_exchange_flow_job, "interval",
-        minutes=settings.EXCHANGE_FLOW_INTERVAL,
-        id="exchange_flow", name="Exchange Flow Monitor",
-        next_run_time=now + timedelta(minutes=3),
-    )
-
-    # Step 5: Social scanner — every 2 hours (first run: 10 min)
-    scheduler.add_job(
-        run_social_scanner_job, "interval",
-        minutes=settings.SOCIAL_SCAN_INTERVAL,
-        id="social_scanner", name="Social Scanner",
-        next_run_time=now + timedelta(minutes=10),
-    )
-
-    # Known wallet tracker — every 30 min (first run: 1 min)
-    scheduler.add_job(
-        run_wallet_tracker_job, "interval",
-        minutes=settings.WALLET_TRACK_INTERVAL,
-        id="wallet_tracker", name="Wallet Tracker",
-        next_run_time=now + timedelta(minutes=1),
-    )
-
-    # Score recalculation — every 30 min (first run: 4 min, after profile_checker)
-    scheduler.add_job(
-        run_scorer_job, "interval",
-        minutes=settings.SCORE_RECALC_INTERVAL,
-        id="scorer", name="Score Recalculator",
-        next_run_time=now + timedelta(minutes=4),
-    )
-
-    # Cleanup — every 6 hours (was 24h, never fired between deploys); first run: 8 min
-    scheduler.add_job(
-        run_cleanup_job, "interval",
-        hours=6,
-        id="cleanup", name="Cleanup",
-        next_run_time=now + timedelta(minutes=8),
-    )
+    for job_id, name, fn, trigger_kwargs, offset_min in jobs:
+        scheduler.add_job(
+            fn, "interval",
+            id=job_id, name=name,
+            next_run_time=M(offset_min),
+            **trigger_kwargs,
+        )
 
     # Daily digest — once per day at 20:00 UTC
     scheduler.add_job(
         send_daily_digest, "cron",
         hour=20, minute=0,
         id="daily_digest", name="Daily Digest",
-    )
-
-    # ─── Phase 2: launch + exploit detection ──────────────────────────
-    # Pair watcher — every 5 min (catches new DEX pools, Modules 4/5/9)
-    scheduler.add_job(
-        run_pair_watcher_job, "interval",
-        minutes=settings.PAIR_WATCHER_INTERVAL_MIN,
-        id="pair_watcher", name="Pair Watcher",
-        next_run_time=now + timedelta(minutes=2),
-    )
-
-    # Deployer watcher — every 10 min (Modules 1/2 + Module 3 Phase B)
-    scheduler.add_job(
-        run_deployer_watcher_job, "interval",
-        minutes=settings.DEPLOYER_WATCHER_INTERVAL_MIN,
-        id="deployer_watcher", name="Golden Deployer Watcher",
-        next_run_time=now + timedelta(minutes=3),
-    )
-
-    # Whale-fresh-wallet funding scanner — every 10 min (Module 3 Phase A)
-    scheduler.add_job(
-        run_whale_fresh_job, "interval",
-        minutes=settings.WHALE_FRESH_WATCHER_INTERVAL_MIN,
-        id="whale_fresh_watcher", name="Whale→Fresh Funding",
-        next_run_time=now + timedelta(minutes=6),
-    )
-
-    # Launch scorer — every 2 min (aggregates signals → tiered alerts)
-    scheduler.add_job(
-        run_launch_scorer_job, "interval",
-        minutes=settings.LAUNCH_SCORER_INTERVAL_MIN,
-        id="launch_scorer", name="Launch Scorer",
-        next_run_time=now + timedelta(minutes=4),
-    )
-
-    # Exploit watcher — every 3 min (Module 14)
-    scheduler.add_job(
-        run_exploit_watcher_job, "interval",
-        minutes=settings.EXPLOIT_WATCHER_INTERVAL_MIN,
-        id="exploit_watcher", name="Exploit Watcher",
-        next_run_time=now + timedelta(minutes=5),
-    )
-
-    # Operator graph — every 15 min (Modules 6 + 11)
-    scheduler.add_job(
-        run_operator_graph_job, "interval",
-        minutes=15,
-        id="operator_graph", name="Operator Graph",
-        next_run_time=now + timedelta(minutes=7),
-    )
-
-    # Bytecode match — every 30 min (Module 7)
-    scheduler.add_job(
-        run_bytecode_match_job, "interval",
-        minutes=30,
-        id="bytecode_match", name="Bytecode Fingerprint",
-        next_run_time=now + timedelta(minutes=12),
-    )
-
-    # Portfolio gate — every 60 min (Module 8, filter only)
-    scheduler.add_job(
-        run_portfolio_gate_job, "interval",
-        minutes=60,
-        id="portfolio_gate", name="Portfolio Gate",
-        next_run_time=now + timedelta(minutes=15),
-    )
-
-    # Launchpad watcher — every 30 min (Module 12)
-    scheduler.add_job(
-        run_launchpad_watcher_job, "interval",
-        minutes=30,
-        id="launchpad_watcher", name="Launchpad Watcher",
-        next_run_time=now + timedelta(minutes=20),
-    )
-
-    # Treasury outflow — every 30 min (Module 13)
-    scheduler.add_job(
-        run_treasury_outflow_job, "interval",
-        minutes=settings.TREASURY_OUTFLOW_INTERVAL_MIN,
-        id="treasury_outflow", name="Treasury Outflow",
-        next_run_time=now + timedelta(minutes=9),
     )
 
     return scheduler

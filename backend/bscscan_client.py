@@ -150,8 +150,14 @@ async def _reconstruct_holders_from_logs(
     """
     Reconstruct top holders by replaying Transfer events from eth_getLogs.
     Computes net balances per wallet from recent transfers.
-    Memory-efficient: scans only the last ~30k blocks in small chunks.
+
+    Memory-bounded: scans the last RECONSTRUCT_BLOCKS blocks and hard-caps
+    both the log count and the balances dict size. After each chunk we
+    drop near-zero entries so the dict never explodes on high-volume
+    contracts (the previous 200k block / 20k log cap was the root cause
+    of the repeated OOMs on the 2GB Render container).
     """
+    import gc
     from collections import defaultdict
 
     # Known addresses to exclude (routers, burn addresses, exchanges)
@@ -170,9 +176,16 @@ async def _reconstruct_holders_from_logs(
 
     latest = _hex_to_int(latest_block)
 
-    # Scan last ~200k blocks in chunks of 4999 (MegaNode free tier max is 5000)
+    # Memory caps (tuned to stay well under 2GB container):
+    #   50k blocks ≈ 40 hours of BSC  — enough for top-holder snapshots
+    #   7k logs    cap — above this we stop accumulating (~7MB in dict)
+    #   60k wallets max — above this we prune zero/negative entries
+    RECONSTRUCT_BLOCKS = 50_000
+    MAX_LOGS = 7_000
+    PRUNE_WHEN_WALLETS_EXCEED = 60_000
+
     chunk_size = 4999
-    start_block = max(0, latest - 200000)
+    start_block = max(0, latest - RECONSTRUCT_BLOCKS)
     total_logs = 0
 
     for from_block in range(start_block, latest, chunk_size):
@@ -199,9 +212,20 @@ async def _reconstruct_holders_from_logs(
             balances[to_addr] += amount
 
         total_logs += len(logs)
-        # Safety: stop if we've processed too many logs to avoid OOM
-        if total_logs > 20000:
-            logger.warning(f"Holder reconstruction capped at {total_logs} logs for {contract_address[:10]}")
+        # Drop references to the chunk's logs immediately
+        del logs
+
+        # Periodic prune — keep only positive balances to bound dict size
+        if len(balances) > PRUNE_WHEN_WALLETS_EXCEED:
+            balances = defaultdict(int, {
+                a: b for a, b in balances.items() if b > 0
+            })
+
+        if total_logs > MAX_LOGS:
+            logger.info(
+                f"Holder reconstruction cap reached ({total_logs} logs, "
+                f"{len(balances)} wallets) for {contract_address[:10]}"
+            )
             break
 
     # Sort by balance, exclude zero/negative and infrastructure
@@ -211,6 +235,11 @@ async def _reconstruct_holders_from_logs(
         key=lambda x: x[1],
         reverse=True,
     )
+
+    # Free the big dict before returning
+    balances.clear()
+    del balances
+    gc.collect()
 
     # Paginate
     start = (page - 1) * offset
@@ -226,8 +255,19 @@ async def _reconstruct_holders_from_logs(
     return _etherscan_response(transformed)
 
 
-async def _chunked_get_logs(filter_params: dict, total_blocks: int = 10000) -> list:
-    """Fetch eth_getLogs in chunks of 4999 blocks (MegaNode free tier limit)."""
+async def _chunked_get_logs(
+    filter_params: dict,
+    total_blocks: int = 10000,
+    max_logs: int = 8000,
+) -> list:
+    """
+    Fetch eth_getLogs in chunks of 4999 blocks (MegaNode free tier limit).
+
+    `max_logs` is a hard memory cap — once we've accumulated this many
+    events we stop and return what we have. Lowered from 20k (old default)
+    because each log object is ~600-800 bytes, and 20k × several
+    concurrent callers was the main driver of the 2GB OOMs.
+    """
     latest_block = await _rpc_call("eth_blockNumber", [])
     if not latest_block:
         return []
@@ -243,8 +283,7 @@ async def _chunked_get_logs(filter_params: dict, total_blocks: int = 10000) -> l
         logs = await _rpc_call("eth_getLogs", [params])
         if logs:
             all_logs.extend(logs)
-        # Safety cap
-        if len(all_logs) > 20000:
+        if len(all_logs) >= max_logs:
             break
 
     return all_logs

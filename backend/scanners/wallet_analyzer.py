@@ -30,7 +30,11 @@ MIN_SHARED_FUNDING_FOR_CLUSTER = 3  # If 3+ holders share a funding source
 FRESH_WALLET_MAX_AGE_DAYS = 30
 
 # Batching
-ANALYZE_BATCH_SIZE = 20         # max tokens per run
+# Each analysis pulls top holders + traces funding for each, which can
+# trigger ~50 RPC calls and accumulate hundreds of holder records. We
+# keep the batch tight so peak memory stays well under the 2GB container
+# even when this job runs concurrently with another heavy scanner.
+ANALYZE_BATCH_SIZE = 10         # max tokens per run (was 20)
 ANALYZE_TTL_HOURS = 12          # don't re-analyze a token within this window
 
 
