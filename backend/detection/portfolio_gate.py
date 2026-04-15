@@ -42,16 +42,22 @@ async def _portfolio_usd(db: Session, chain: str, addr: str) -> float | None:
 
     total_usd: float | None = None
 
-    # Preferred: Nansen (richer data), falls back to Arkham
-    if nansen.configured:
-        data = await nansen.label_address(chain, addr)
+    # Preferred: Nansen Profiler (richer + more accurate balances).
+    # Falls back to Arkham when Nansen isn't configured or returns no
+    # data. Nansen's /profiler/address/balances endpoint returns a
+    # per-token breakdown; we sum `value_usd` to get the portfolio total.
+    if nansen.configured and chain in ("ethereum", "bsc"):
+        data = await nansen.profiler_address_balances([addr], chains=[chain])
         if isinstance(data, dict):
-            v = data.get("portfolio_usd") or data.get("totalValueUsd")
-            if v is not None:
+            holdings = data.get("data") or data.get("balances") or []
+            if isinstance(holdings, list):
                 try:
-                    total_usd = float(v)
+                    total_usd = sum(
+                        float(h.get("value_usd") or h.get("valueUsd") or 0)
+                        for h in holdings
+                    )
                 except Exception:
-                    pass
+                    total_usd = None
 
     if total_usd is None:
         try:

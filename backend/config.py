@@ -45,7 +45,11 @@ class Settings(BaseSettings):
 
     # Nansen (Smart Money labels, launch watcher)
     NANSEN_API_KEY: str = ""
-    NANSEN_BASE_URL: str = "https://api.nansen.ai/api/beta"
+    # Nansen API: base URL is /api/v1 (the /api/beta namespace was
+    # deprecated on 2025-10-01). All data endpoints are POST with a
+    # JSON body and require the lowercase `apikey` header.
+    # Docs: https://docs.nansen.ai/getting-started/api-structure-and-base-url
+    NANSEN_BASE_URL: str = "https://api.nansen.ai/api/v1"
 
     # GMGN (Solana smart money tracker)
     GMGN_API_KEY: str = ""
