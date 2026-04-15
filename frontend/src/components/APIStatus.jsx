@@ -111,6 +111,51 @@ function APIRow({ api }) {
               <b>Live error:</b> {api.error}
             </div>
           )}
+          {api.hint && (
+            <div style={{
+              color: '#ffaa00',
+              marginBottom: '6px',
+              fontSize: '11px',
+              fontStyle: 'italic',
+            }}>
+              Hint: {api.hint}
+            </div>
+          )}
+          {api.attempts && api.attempts.length > 0 && (
+            <div style={{
+              padding: '8px',
+              background: '#0a0a0f',
+              borderRadius: '4px',
+              marginBottom: '8px',
+              fontFamily: 'monospace',
+              fontSize: '11px',
+            }}>
+              <div style={{ color: '#666', marginBottom: '4px' }}>PROBE ATTEMPTS:</div>
+              {api.attempts.map((a, i) => (
+                <div key={i} style={{ color: '#aaa', marginBottom: '6px' }}>
+                  <span style={{
+                    color: a.status === 200 ? '#44ff88' : '#ff8888',
+                  }}>
+                    [{a.status || '—'}]
+                  </span>{' '}
+                  <span style={{ color: '#888' }}>{a.endpoint}</span>
+                  <div style={{ color: '#555', fontSize: '10px', marginLeft: '32px' }}>
+                    {a.url}
+                  </div>
+                  {a.preview && (
+                    <div style={{ color: '#666', fontSize: '10px', marginLeft: '32px' }}>
+                      {a.preview}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {api.working_url && (
+            <div style={{ color: '#44ff88', fontSize: '11px', marginBottom: '6px' }}>
+              Working URL: <code>{api.working_url}</code>
+            </div>
+          )}
           {api.last_job_error && (
             <div style={{
               padding: '8px',
@@ -234,6 +279,149 @@ function SeedActions() {
   );
 }
 
+const severityColors = {
+  critical: { bg: '#331111', color: '#ff5555', icon: '\u274c' },
+  warning:  { bg: '#332211', color: '#ffaa00', icon: '\u26a0' },
+  info:     { bg: '#111a33', color: '#88aaff', icon: '\u2139' },
+};
+
+function HealthAuditPanel() {
+  const { data: audit, loading, refetch } = useApi('/diagnostics/health-audit', {
+    refreshInterval: 120000,
+  });
+  const [healing, setHealing] = useState(false);
+  const [lastHealResult, setLastHealResult] = useState(null);
+
+  async function autoHeal() {
+    if (!audit?.issues) return;
+    setHealing(true);
+    setLastHealResult(null);
+    const results = [];
+    try {
+      for (const issue of audit.issues) {
+        if (!issue.auto_fix_url) continue;
+        try {
+          const resp = await fetch(issue.auto_fix_url, { method: 'POST' });
+          const payload = await resp.json();
+          results.push({ id: issue.id, ok: resp.ok, payload });
+        } catch (e) {
+          results.push({ id: issue.id, ok: false, error: e.message });
+        }
+      }
+      setLastHealResult(results);
+      if (refetch) await refetch();
+    } finally {
+      setHealing(false);
+    }
+  }
+
+  const issues = audit?.issues || [];
+  const summary = audit?.summary;
+  const healthy = audit?.healthy;
+  const autoFixable = issues.filter((i) => i.auto_fix_url).length;
+
+  return (
+    <div style={{ ...cardStyle, marginBottom: '24px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+        <div>
+          <h3 style={{ fontSize: '14px', margin: 0, color: '#fff' }}>
+            Routine Health Audit{' '}
+            <span style={{ color: '#666', fontWeight: 'normal' }}>
+              — same data a Claude routine would see
+            </span>
+          </h3>
+          {summary && (
+            <div style={{ fontSize: '12px', color: '#888', marginTop: '6px' }}>
+              {healthy ? (
+                <span style={{ color: '#44ff88' }}>HEALTHY</span>
+              ) : (
+                <span style={{ color: '#ff5555' }}>UNHEALTHY</span>
+              )}
+              {' · '}
+              Critical: <b style={{ color: '#ff5555' }}>{summary.critical}</b>{' · '}
+              Warning: <b style={{ color: '#ffaa00' }}>{summary.warning}</b>{' · '}
+              Info: <b style={{ color: '#88aaff' }}>{summary.info}</b>
+            </div>
+          )}
+        </div>
+        {autoFixable > 0 && (
+          <button
+            onClick={autoHeal}
+            disabled={healing}
+            style={{
+              background: healing ? '#222' : '#1a2e1a',
+              border: '1px solid #44ff88',
+              color: healing ? '#555' : '#44ff88',
+              padding: '8px 16px',
+              borderRadius: '4px',
+              cursor: healing ? 'default' : 'pointer',
+              fontSize: '12px',
+              fontWeight: 'bold',
+            }}
+          >
+            {healing ? 'Healing…' : `Auto-heal (${autoFixable})`}
+          </button>
+        )}
+      </div>
+
+      {loading && !audit ? (
+        <div style={{ color: '#666', padding: '16px 0' }}>Running audit…</div>
+      ) : issues.length === 0 ? (
+        <div style={{ color: '#44ff88', padding: '12px 0', fontSize: '13px' }}>
+          {'\u2705'} All checks passing. Next audit in 2 minutes.
+        </div>
+      ) : (
+        <div>
+          {issues.map((issue) => {
+            const s = severityColors[issue.severity] || severityColors.info;
+            return (
+              <div
+                key={issue.id}
+                style={{
+                  padding: '10px 12px',
+                  marginBottom: '8px',
+                  background: s.bg,
+                  borderRadius: '4px',
+                  borderLeft: `3px solid ${s.color}`,
+                  fontSize: '12px',
+                }}
+              >
+                <div style={{ color: s.color, fontWeight: 'bold', marginBottom: '4px' }}>
+                  {s.icon} {issue.title}
+                </div>
+                <div style={{ color: '#aaa', marginBottom: '4px' }}>
+                  {issue.likely_fix}
+                </div>
+                {issue.files_to_check && issue.files_to_check.length > 0 && (
+                  <div style={{ color: '#666', fontFamily: 'monospace', fontSize: '11px' }}>
+                    files: {issue.files_to_check.join(', ')}
+                  </div>
+                )}
+                {issue.auto_fix_url && (
+                  <div style={{ color: '#44ff88', fontSize: '11px', marginTop: '4px' }}>
+                    auto-fixable via {issue.auto_fix_url}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {lastHealResult && (
+        <div style={{ marginTop: '12px', padding: '10px', background: '#0a0a0f', borderRadius: '4px' }}>
+          <div style={{ color: '#888', fontSize: '11px', marginBottom: '4px' }}>LAST HEAL RESULT</div>
+          {lastHealResult.map((r, i) => (
+            <div key={i} style={{ fontSize: '11px', color: r.ok ? '#44ff88' : '#ff8888' }}>
+              {r.id}: {r.ok ? JSON.stringify(r.payload) : r.error}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function APIStatus() {
   const { data, loading, refetch } = useApi('/diagnostics/apis', { refreshInterval: 60000 });
   const [refreshing, setRefreshing] = useState(false);
@@ -273,6 +461,8 @@ function APIStatus() {
       </div>
 
       <SummaryBar summary={summary} />
+
+      <HealthAuditPanel />
 
       <SeedActions />
 
