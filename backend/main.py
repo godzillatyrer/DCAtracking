@@ -37,6 +37,48 @@ logger = logging.getLogger(__name__)
 Base.metadata.create_all(bind=engine)
 
 
+def _widen_legacy_columns() -> None:
+    """
+    One-shot online migration: widen VARCHAR columns that were initially
+    declared too narrow.
+
+    SQLAlchemy's create_all() never alters existing columns, so model
+    changes only take effect for fresh databases. These ALTER TABLEs
+    are idempotent (Postgres no-op when the type already matches) and
+    are safe to keep here permanently.
+
+    Concrete failures this addresses:
+      protocol_tvl_snapshots.chain VARCHAR(40) → exceeded by multi-chain
+        protocols like "Ethereum,Plasma,Arbitrum,Base,Mantle".
+      protocol_tvl_snapshots.protocol_slug VARCHAR(100) → some DeFi Llama
+        composite slugs are longer.
+      exploit_candidates.{chain,protocol_slug} → same root cause; we
+        store composite "{bridge}:{tx_hash}" slugs that exceeded 100.
+    """
+    from sqlalchemy import text
+
+    statements = [
+        # protocol_tvl_snapshots
+        "ALTER TABLE protocol_tvl_snapshots ALTER COLUMN chain TYPE VARCHAR(255)",
+        "ALTER TABLE protocol_tvl_snapshots ALTER COLUMN protocol_slug TYPE VARCHAR(255)",
+        # exploit_candidates
+        "ALTER TABLE exploit_candidates ALTER COLUMN chain TYPE VARCHAR(255)",
+        "ALTER TABLE exploit_candidates ALTER COLUMN protocol_slug TYPE VARCHAR(255)",
+    ]
+    with engine.connect() as conn:
+        for sql in statements:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+            except Exception as e:
+                # ALTERs on a brand-new table or non-existent column will
+                # raise — log and continue.
+                logger.info(f"widen migration skipped: {sql} ({e})")
+
+
+_widen_legacy_columns()
+
+
 def _cleanup_legacy_data() -> None:
     """
     One-shot data cleanup at boot to scrub the artifacts of the old

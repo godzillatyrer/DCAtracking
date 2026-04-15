@@ -17,9 +17,15 @@ class ProtocolTVLSnapshot(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    protocol_slug = Column(String(100), nullable=False)  # DeFi Llama slug
+    # protocol_slug: DeFi Llama slugs are usually <40 chars but a few are
+    # long composites (e.g. forks). 255 leaves headroom indefinitely.
+    protocol_slug = Column(String(255), nullable=False)
     protocol_name = Column(String(255))
-    chain = Column(String(40))
+
+    # chain: comma-joined list of chain names from DeFi Llama. Multi-chain
+    # protocols (Ethereum,Plasma,Arbitrum,Base,Mantle,...) routinely
+    # exceed 40 chars; 255 is plenty.
+    chain = Column(String(255))
 
     tvl_usd = Column(Numeric(20, 2))
     native_token_symbol = Column(String(50))
