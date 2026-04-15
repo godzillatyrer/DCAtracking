@@ -55,10 +55,15 @@ ERROR_JOBS_BY_API = {
 }
 
 
-# --- In-process 60s cache -------------------------------------------------
-
+# --- In-process cache ------------------------------------------------
+#
+# Cached for 5 minutes so the API Status page + routine audits don't
+# themselves contribute meaningful traffic to rate-limited providers
+# (esp. GeckoTerminal's 30 req/min). `?force=1` bypasses. Previously
+# 60s which was enough to start tripping the GT limit alongside the
+# real pair_watcher traffic.
 _CACHE: dict[str, tuple[float, dict]] = {}
-_TTL = 60.0
+_TTL = 300.0
 
 
 def _cached(key: str):
@@ -704,27 +709,37 @@ def _check_data_freshness(db: Session) -> list[dict]:
 
 
 def _check_alert_throughput(db: Session) -> list[dict]:
-    """Flag the system being too loud OR too quiet on alerts."""
+    """Flag the system being too loud on alerts.
+
+    Cap is enforced per UTC calendar day in fire_*_alert. A rolling
+    24h window can legitimately span two cap days, so we compare
+    against 2× daily cap + small grace — under that is not suspicious.
+    """
     from backend.models.alert import Alert
 
     issues = []
     now = datetime.utcnow()
     since = now - timedelta(hours=24)
 
-    sent_today = db.query(Alert).filter(
+    sent_rolling_24h = db.query(Alert).filter(
         Alert.fired_at >= since,
         Alert.telegram_sent.is_(True),
     ).count()
 
-    if sent_today > settings.MAX_ALERTS_PER_DAY + settings.MAX_EXPLOIT_ALERTS_PER_DAY + 2:
-        # Grace of +2 for cap-edge cases
+    daily_cap = settings.MAX_ALERTS_PER_DAY + settings.MAX_EXPLOIT_ALERTS_PER_DAY
+    # A 24h window spans UP TO two cap-days, so twice the cap is legit.
+    two_day_ceiling = daily_cap * 2 + 3  # grace for edge races
+
+    if sent_rolling_24h > two_day_ceiling:
         issues.append({
             "id": "alert_spam",
             "severity": "warning",
             "category": "alerts",
-            "title": f"Unusually high alert volume: {sent_today} in 24h",
+            "title": f"Unusually high alert volume: {sent_rolling_24h} in rolling 24h",
             "details": {
-                "sent_24h": sent_today,
+                "sent_rolling_24h": sent_rolling_24h,
+                "daily_cap_combined": daily_cap,
+                "rolling_24h_ceiling": two_day_ceiling,
                 "launch_cap": settings.MAX_ALERTS_PER_DAY,
                 "exploit_cap": settings.MAX_EXPLOIT_ALERTS_PER_DAY,
             },

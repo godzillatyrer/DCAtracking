@@ -42,6 +42,12 @@ WHALE_ROLES = {
     "golden_deployer", "distributor",
 }
 
+# Max whales scanned per run. With 500+ KnownWallet rows in operator/
+# distributor roles, scanning all of them per 10-min interval routinely
+# exceeded the run budget (same root cause as the wallet_tracker stale
+# bug). ORDER BY random() + LIMIT N rotates the full set over time.
+MAX_WHALES_PER_RUN = 40
+
 
 async def _get_nonce(address: str) -> int:
     result = await _rpc_call("eth_getTransactionCount", [address.lower(), "latest"])
@@ -73,17 +79,41 @@ async def _recent_outgoing_txs(wallet: KnownWallet, since_block: int) -> list[di
 
 
 async def record_funding_edges():
-    """Phase A — scan whale outgoing txs, record funding edges."""
+    """Phase A — scan whale outgoing txs, record funding edges.
+
+    Batched like wallet_tracker: with 500+ known wallets, iterating all
+    of them per 10-min run routinely exceeded the interval budget. We
+    random-sample MAX_WHALES_PER_RUN per run; over enough runs we cover
+    the full set. This stops the job from going stale + OOMing.
+    """
+    import gc
+    from sqlalchemy import func as _sql_func
+
     logger.info("Starting whale funding scanner...")
     db = SessionLocal()
     bnb_price = 0.0
     try:
         bnb_price = await _bnb_price_usd()
 
-        whales = db.query(KnownWallet).filter(
+        total_whales = db.query(KnownWallet).filter(
             KnownWallet.is_active.is_(True),
             KnownWallet.role.in_(list(WHALE_ROLES)),
-        ).all()
+        ).count()
+
+        whales = (
+            db.query(KnownWallet)
+            .filter(
+                KnownWallet.is_active.is_(True),
+                KnownWallet.role.in_(list(WHALE_ROLES)),
+            )
+            .order_by(_sql_func.random())
+            .limit(MAX_WHALES_PER_RUN)
+            .all()
+        )
+
+        logger.info(
+            f"Whale funding scanner: {len(whales)} of {total_whales} whales this run"
+        )
 
         min_usd = settings.WHALE_FUNDING_MIN_USD
         latest = await _rpc_call("eth_blockNumber", [])
@@ -139,6 +169,9 @@ async def record_funding_edges():
                     )
             except Exception as e:
                 logger.error(f"whale scan error on {w.wallet_address}: {e}")
+            finally:
+                # Free per-whale RPC response blobs before the next one
+                gc.collect()
 
         db.commit()
         logger.info(f"Whale funding scanner complete. {edges_added} new edges.")

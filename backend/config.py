@@ -104,7 +104,9 @@ class Settings(BaseSettings):
     WHALE_FRESH_WATCHER_INTERVAL_MIN: int = 10
     TREASURY_OUTFLOW_INTERVAL_MIN: int = 30
     LAUNCH_SCORER_INTERVAL_MIN: int = 2
-    EXPLOIT_WATCHER_INTERVAL_MIN: int = 3
+    # Bumped 3→5 after a 10× stale observation — at 3min the run budget
+    # was too tight once _check_bridge_drains ran across 6 bridges.
+    EXPLOIT_WATCHER_INTERVAL_MIN: int = 5
 
     # Phase 3: Solana intervals
     SOLANA_PAIR_WATCHER_INTERVAL_MIN: int = 7
