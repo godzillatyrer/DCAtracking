@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 Base.metadata.create_all(bind=engine)
 
 
-def _widen_legacy_columns() -> None:
+def _widen_legacy_columns() -> dict:
     """
     One-shot online migration: widen VARCHAR columns that were initially
     declared too narrow.
@@ -46,6 +46,14 @@ def _widen_legacy_columns() -> None:
     changes only take effect for fresh databases. These ALTER TABLEs
     are idempotent (Postgres no-op when the type already matches) and
     are safe to keep here permanently.
+
+    Returns a per-column result dict so the /fix/widen-columns endpoint
+    can surface exactly which ALTERs succeeded / failed / were no-ops.
+    Every run VERIFIES via information_schema that the column is now at
+    the target width — earlier "silent skip" handling was swallowing
+    real failures (seen in production: chain stuck at VARCHAR(40)
+    despite the ALTER running, causing StringDataRightTruncation on
+    every exploit_watcher run).
 
     Concrete failures this addresses:
       protocol_tvl_snapshots.chain VARCHAR(40) → exceeded by multi-chain
@@ -57,23 +65,62 @@ def _widen_legacy_columns() -> None:
     """
     from sqlalchemy import text
 
-    statements = [
-        # protocol_tvl_snapshots
-        "ALTER TABLE protocol_tvl_snapshots ALTER COLUMN chain TYPE VARCHAR(255)",
-        "ALTER TABLE protocol_tvl_snapshots ALTER COLUMN protocol_slug TYPE VARCHAR(255)",
-        # exploit_candidates
-        "ALTER TABLE exploit_candidates ALTER COLUMN chain TYPE VARCHAR(255)",
-        "ALTER TABLE exploit_candidates ALTER COLUMN protocol_slug TYPE VARCHAR(255)",
+    targets = [
+        # (table, column, target_width)
+        ("protocol_tvl_snapshots", "chain",         255),
+        ("protocol_tvl_snapshots", "protocol_slug", 255),
+        ("exploit_candidates",     "chain",         255),
+        ("exploit_candidates",     "protocol_slug", 255),
     ]
+    results: dict[str, str] = {}
     with engine.connect() as conn:
-        for sql in statements:
+        for table, col, width in targets:
+            key = f"{table}.{col}"
+            sql = f"ALTER TABLE {table} ALTER COLUMN {col} TYPE VARCHAR({width})"
             try:
                 conn.execute(text(sql))
                 conn.commit()
             except Exception as e:
-                # ALTERs on a brand-new table or non-existent column will
-                # raise — log and continue.
-                logger.info(f"widen migration skipped: {sql} ({e})")
+                # Table/column might not exist yet on a brand new DB —
+                # note it but don't fail out.
+                msg = str(e)[:200]
+                results[key] = f"ALTER failed: {msg}"
+                logger.warning(
+                    f"_widen_legacy_columns: ALTER failed for {key} — {msg}"
+                )
+                continue
+
+            # VERIFY — query information_schema to confirm width is now >= target.
+            try:
+                row = conn.execute(
+                    text("""
+                        SELECT character_maximum_length
+                        FROM information_schema.columns
+                        WHERE table_name = :t AND column_name = :c
+                    """),
+                    {"t": table, "c": col},
+                ).first()
+                if row is None:
+                    results[key] = "skipped (table/column missing)"
+                elif row[0] is None:
+                    results[key] = "skipped (column is not VARCHAR)"
+                elif row[0] < width:
+                    # This is the FAILURE MODE we care about — ALTER ran
+                    # but didn't stick. Previously silent; now loud.
+                    results[key] = f"WIDEN DID NOT TAKE EFFECT — still VARCHAR({row[0]})"
+                    logger.warning(
+                        f"_widen_legacy_columns: {key} still VARCHAR({row[0]}) "
+                        f"after ALTER. Run POST /api/diagnostics/fix/widen-columns "
+                        f"manually, or investigate DB permissions."
+                    )
+                else:
+                    results[key] = f"ok (VARCHAR({row[0]}))"
+            except Exception as e:
+                results[key] = f"verify failed: {str(e)[:200]}"
+                logger.warning(
+                    f"_widen_legacy_columns: verify failed for {key} — {e}"
+                )
+    return results
 
 
 _widen_legacy_columns()

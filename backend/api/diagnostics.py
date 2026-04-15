@@ -774,11 +774,29 @@ def fix_widen_columns():
 
     Idempotent: Postgres no-ops ALTER TYPE when the target width
     already matches. Safe to call even when nothing is wrong.
+
+    Returns per-column verification results so the routine can see
+    whether each ALTER actually took effect — a bare "ran" success
+    was previously masking silent failures that kept the schema drift
+    issue alive.
     """
     from backend.main import _widen_legacy_columns
     try:
-        _widen_legacy_columns()
-        return {"status": "ok", "message": "widen_legacy_columns ran"}
+        results = _widen_legacy_columns() or {}
+        any_failed = any(
+            "DID NOT TAKE EFFECT" in v or v.startswith("ALTER failed")
+            for v in results.values()
+        )
+        return {
+            "status": "error" if any_failed else "ok",
+            "message": (
+                "widen_legacy_columns ran but one or more ALTERs did not "
+                "take effect — check `columns` below"
+                if any_failed
+                else "widen_legacy_columns ran; all columns verified"
+            ),
+            "columns": results,
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)[:300]}
 
