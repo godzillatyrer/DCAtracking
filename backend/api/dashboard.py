@@ -323,6 +323,9 @@ def get_scan_log_summary(db: Session = Depends(get_db)):
         "treasury_outflow",
         # Phase 2 — seeders
         "bridges_seeder", "golden_deployers_seeder",
+        # Phase 3 — Solana
+        "solana_pair_watcher", "solana_deployer_watcher", "solana_whale_fresh",
+        "solana_seeder",
     ]
     summary = []
     for job in jobs:
@@ -569,6 +572,101 @@ def _run_golden_deployers_seeder_background():
             db.commit()
         finally:
             db.close()
+
+
+def _run_solana_seeder_background():
+    """Seed solana_known_wallets infrastructure rows."""
+    import logging
+    from datetime import datetime as _dt
+    from backend.database import SessionLocal as _SL
+    from backend.models.scan_log import ScanLog as _SL_LOG
+    from backend.models.solana_known_wallet import SolanaKnownWallet as _SKW
+
+    logger = logging.getLogger(__name__)
+    started = _dt.utcnow()
+    try:
+        import importlib.util
+        import pathlib
+        script = (
+            pathlib.Path(__file__).resolve().parent.parent.parent
+            / "scripts" / "seed_solana_known_wallets.py"
+        )
+        spec = importlib.util.spec_from_file_location("seed_solana", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        db = _SL()
+        added = 0
+        try:
+            for addr, name in mod.INFRASTRUCTURE:
+                existing = db.query(_SKW).filter_by(wallet_address=addr).first()
+                if existing:
+                    continue
+                db.add(_SKW(
+                    wallet_address=addr,
+                    label=name,
+                    role="infrastructure",
+                    is_active=True,
+                    added_at=_dt.utcnow(),
+                    notes="Public Solana infrastructure — excluded from whale scans.",
+                ))
+                added += 1
+            db.commit()
+
+            total = db.query(_SKW).count()
+            db.add(_SL_LOG(
+                job_name="solana_seeder",
+                status="success",
+                tokens_flagged=added,
+                details=f"Seeded {added} new infrastructure rows. "
+                        f"solana_known_wallets now holds {total} total.",
+                started_at=started,
+                finished_at=_dt.utcnow(),
+                duration_seconds=int((_dt.utcnow() - started).total_seconds()),
+            ))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Solana seeder failed: {e}")
+        db = _SL()
+        try:
+            db.add(_SL_LOG(
+                job_name="solana_seeder", status="error",
+                error_message=str(e)[:500],
+                started_at=started, finished_at=_dt.utcnow(),
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+
+@router.post("/seed-solana-wallets")
+def trigger_solana_seed(
+    background_tasks: BackgroundTasks,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Seed solana_known_wallets with public infrastructure rows."""
+    from datetime import timedelta
+    recent = (
+        db.query(ScanLog)
+        .filter(
+            ScanLog.job_name == "solana_seeder",
+            ScanLog.started_at >= datetime.utcnow() - timedelta(hours=SEEDER_COOLDOWN_HOURS),
+        )
+        .order_by(ScanLog.started_at.desc())
+        .first()
+    )
+    if recent and not force:
+        return {
+            "status": "skipped",
+            "message": f"Solana seeder already ran at {recent.started_at.isoformat()}. "
+                       f"Pass force=true to re-run.",
+            "last_run": recent.started_at.isoformat(),
+        }
+    background_tasks.add_task(_run_solana_seeder_background)
+    return {"status": "started", "message": "Solana seeder running. <5s."}
 
 
 @router.post("/seed-bridges")

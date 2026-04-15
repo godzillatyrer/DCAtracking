@@ -87,5 +87,41 @@ class HeliusClient:
             return r.get("value") or []
         return []
 
+    async def get_account_info(self, address: str) -> dict | None:
+        """jsonParsed accountInfo — used to read SPL mint authority/supply."""
+        r = await self._rpc(
+            "getAccountInfo",
+            [address, {"encoding": "jsonParsed"}],
+        )
+        if r and isinstance(r, dict):
+            return r.get("value")
+        return None
+
+    async def get_mint_authority_and_supply(
+        self, mint_address: str
+    ) -> tuple[str | None, int | None, int | None]:
+        """
+        For an SPL mint account, return (mint_authority, supply, decimals).
+
+        On Solana the "deployer" of a token is the account currently holding
+        mint authority. None means the mint authority has been disabled
+        (often a positive sign for legitimacy).
+        """
+        info = await self.get_account_info(mint_address)
+        if not info:
+            return (None, None, None)
+        try:
+            parsed = ((info.get("data") or {}).get("parsed") or {}).get("info") or {}
+            authority = parsed.get("mintAuthority")
+            supply = parsed.get("supply")
+            decimals = parsed.get("decimals")
+            return (
+                authority,
+                int(supply) if supply is not None else None,
+                int(decimals) if decimals is not None else None,
+            )
+        except Exception:
+            return (None, None, None)
+
 
 helius = HeliusClient()

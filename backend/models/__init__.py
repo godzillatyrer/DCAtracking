@@ -18,6 +18,10 @@ from backend.models.contract_bytecode import ContractBytecode
 from backend.models.protocol_tvl_snapshot import ProtocolTVLSnapshot
 from backend.models.exploit_candidate import ExploitCandidate
 
+# Phase 3: Solana
+from backend.models.solana_known_wallet import SolanaKnownWallet
+from backend.models.solana_wallet_activity import SolanaWalletActivity
+
 __all__ = [
     "FlaggedToken",
     "TokenProfile",
@@ -36,4 +40,6 @@ __all__ = [
     "ContractBytecode",
     "ProtocolTVLSnapshot",
     "ExploitCandidate",
+    "SolanaKnownWallet",
+    "SolanaWalletActivity",
 ]

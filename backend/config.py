@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     LAUNCH_SCORER_INTERVAL_MIN: int = 2
     EXPLOIT_WATCHER_INTERVAL_MIN: int = 3
 
+    # Phase 3: Solana intervals
+    SOLANA_PAIR_WATCHER_INTERVAL_MIN: int = 7
+    SOLANA_DEPLOYER_WATCHER_INTERVAL_MIN: int = 12
+    SOLANA_WHALE_FRESH_INTERVAL_MIN: int = 12
+
     # Wallet tracker dust filter — skip token transfers whose USD value
     # cannot be estimated to be above this threshold.
     WALLET_TRACK_MIN_USD: float = 500.0

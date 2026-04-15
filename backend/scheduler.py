@@ -43,6 +43,11 @@ from backend.detection.portfolio_gate import run_portfolio_gate
 from backend.detection.launchpad_watcher import run_launchpad_watcher
 from backend.detection.treasury_outflow import run_treasury_outflow
 
+# Phase 3: Solana detection
+from backend.detection.solana_pair_watcher import run_solana_pair_watcher
+from backend.detection.solana_deployer_watcher import run_solana_deployer_watcher
+from backend.detection.solana_whale_fresh import run_solana_whale_fresh_watcher
+
 logger = logging.getLogger(__name__)
 
 
@@ -386,6 +391,11 @@ run_portfolio_gate_job     = _wrap_launch_job("portfolio_gate",     run_portfoli
 run_launchpad_watcher_job  = _wrap_launch_job("launchpad_watcher",  run_launchpad_watcher)
 run_treasury_outflow_job   = _wrap_launch_job("treasury_outflow",   run_treasury_outflow)
 
+# Phase 3 — Solana
+run_solana_pair_job        = _wrap_launch_job("solana_pair_watcher",     run_solana_pair_watcher)
+run_solana_deployer_job    = _wrap_launch_job("solana_deployer_watcher", run_solana_deployer_watcher)
+run_solana_whale_fresh_job = _wrap_launch_job("solana_whale_fresh",      run_solana_whale_fresh_watcher)
+
 
 def setup_scheduler() -> AsyncIOScheduler:
     """
@@ -437,6 +447,13 @@ def setup_scheduler() -> AsyncIOScheduler:
         ("bytecode_match",    "Bytecode Fingerprint",    run_bytecode_match_job,    {"minutes": 30}, 55),
         ("wallet_analyzer",   "Wallet Analyzer",         _wrap_legacy_job(run_wallet_analyzer_job),   {"minutes": settings.WALLET_ANALYZE_INTERVAL}, 65),
         ("cleanup",           "Cleanup",                 _wrap_legacy_job(run_cleanup_job),           {"hours": 6}, 75),
+
+        # Phase 3 — Solana detection. All three are skip-and-log when
+        # HELIUS_API_KEY is missing, so they're safe to register before
+        # the user has signed up for Helius.
+        ("solana_pair_watcher",     "Solana Pair Watcher",     run_solana_pair_job,     {"minutes": settings.SOLANA_PAIR_WATCHER_INTERVAL_MIN},     22),
+        ("solana_deployer_watcher", "Solana Deployer Watcher", run_solana_deployer_job, {"minutes": settings.SOLANA_DEPLOYER_WATCHER_INTERVAL_MIN}, 27),
+        ("solana_whale_fresh",      "Solana Whale→Fresh",      run_solana_whale_fresh_job, {"minutes": settings.SOLANA_WHALE_FRESH_INTERVAL_MIN},   33),
     ]
 
     for job_id, name, fn, trigger_kwargs, offset_min in jobs:

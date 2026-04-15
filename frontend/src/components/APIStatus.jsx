@@ -174,6 +174,12 @@ function SeedActions() {
       desc: 'Resolves deployer addresses for historical $50M+ BSC launches and tags them as golden_deployer in known_wallets. Takes 5-15 min.',
       url: '/api/dashboard/seed-golden-deployers',
     },
+    {
+      key: 'solana_wallets',
+      title: 'Seed Solana Infrastructure',
+      desc: 'Bootstraps solana_known_wallets with Raydium/Pump.fun/Jupiter so Solana detection has a baseline.',
+      url: '/api/dashboard/seed-solana-wallets',
+    },
   ];
 
   return (
