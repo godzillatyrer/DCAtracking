@@ -244,34 +244,56 @@ async def _check_nansen() -> dict:
     # server SAW the request (key + path reached Nansen) but the path
     # wasn't recognized. Any 200 identifies the correct base + path for
     # the user's specific plan.
+    #
+    # Top of list: /profile/{addr} with apiKey. Previous probes showed
+    # the Bearer-auth variant of this URL returning 401 "No API key
+    # found in request" — meaning the path IS real and is looking for
+    # apiKey header. The Bearer probe was only a sanity check; retrying
+    # this URL with apiKey is the highest-confidence candidate.
     h_apikey = {"apiKey": nansen.key, "accept": "application/json"}
     v1_base = base.replace("/beta", "/v1")
     candidates = [
-        # Standard/Profiler paths
-        (f"{base}/address/ethereum/{probe_addr}/labels",             h_apikey, "beta labels"),
-        (f"{base}/profiler/address/{probe_addr}/labels",             h_apikey, "beta profiler labels"),
-        (f"{v1_base}/address/ethereum/{probe_addr}/labels",          h_apikey, "v1 labels"),
-        (f"{v1_base}/profiler/address/{probe_addr}",                 h_apikey, "v1 profiler address"),
+        # === Highest-confidence candidates ===
+        # /profile/{addr} with apiKey (401 signal from prior probe)
+        (f"{base}/profile/{probe_addr}",                             h_apikey, "profile (apikey — most-likely path)"),
+        (f"{base}/profile/ethereum/{probe_addr}",                    h_apikey, "profile w/ chain"),
+        (f"{base}/profiler/{probe_addr}",                            h_apikey, "profiler (no chain prefix)"),
 
-        # Smart Money endpoints
-        (f"{base}/smart-money/ethereum/wallets",                     h_apikey, "beta smart-money wallets"),
-        (f"{v1_base}/smart-money/ethereum/wallets",                  h_apikey, "v1 smart-money wallets"),
+        # === Wallet Profiler family ===
+        (f"{base}/wallet-profiler/ethereum/{probe_addr}",            h_apikey, "wallet-profiler w/ chain"),
+        (f"{base}/wallet-profiler/{probe_addr}",                     h_apikey, "wallet-profiler (no chain)"),
+        (f"{base}/wallet/ethereum/{probe_addr}",                     h_apikey, "wallet/ethereum"),
+        (f"{base}/wallet/{probe_addr}",                              h_apikey, "wallet (no chain)"),
+        (f"{base}/entity/ethereum/{probe_addr}",                     h_apikey, "entity"),
 
-        # TokenGod Mode (Pro tier flagship feature)
-        (f"{base}/tgm/profile/ethereum/{probe_addr}",                h_apikey, "beta tgm profile"),
-        (f"{v1_base}/tgm/profile/ethereum/{probe_addr}",             h_apikey, "v1 tgm profile"),
-        (f"{base}/token-god-mode/ethereum/{probe_addr}",             h_apikey, "token-god-mode"),
+        # === Common account / auth validation endpoints ===
+        (f"{base}/me",                                               h_apikey, "me (account info)"),
+        (f"{base}/user",                                             h_apikey, "user"),
+        (f"{base}/health",                                           h_apikey, "health"),
+        (f"{base}/status",                                           h_apikey, "status"),
 
-        # Alternate Pro base URLs some tiers use
-        ("https://api.nansen.ai/api/pro/address/ethereum/" + probe_addr + "/labels",
-                                                                      h_apikey, "pro labels"),
-        ("https://api.nansen.ai/v1/address/ethereum/" + probe_addr + "/labels",
-                                                                      h_apikey, "root-v1 labels"),
+        # === TokenGod Mode (Pro-tier flagship) ===
+        (f"{base}/tgm/defi/search?chain=ethereum&limit=1",           h_apikey, "tgm defi search"),
+        (f"{base}/tgm/token/info/ethereum/{probe_addr}",             h_apikey, "tgm token info"),
+        (f"{base}/token-god-mode/token/info/ethereum/{probe_addr}",  h_apikey, "token-god-mode info"),
 
-        # Sanity fallback — confirms auth header format is correct
-        (f"{base}/profile/{probe_addr}",
-         {"Authorization": f"Bearer {nansen.key}", "accept": "application/json"},
-         "profile (Bearer auth sanity check)"),
+        # === Smart Money endpoints ===
+        (f"{base}/smart-money/inflows/ethereum",                     h_apikey, "smart-money inflows"),
+        (f"{base}/smart-money/holdings/ethereum/{probe_addr}",       h_apikey, "smart-money holdings"),
+
+        # === Token queries ===
+        (f"{base}/token/ethereum/{probe_addr}/holders",              h_apikey, "token holders"),
+        (f"{base}/token/ethereum/{probe_addr}/flows",                h_apikey, "token flows"),
+
+        # === Alternative base URLs ===
+        ("https://pro-api.nansen.ai/api/v1/profile/" + probe_addr,
+                                                                      h_apikey, "pro-api subdomain"),
+        ("https://api.nansen.ai/api/v2/profile/" + probe_addr,
+                                                                      h_apikey, "api v2"),
+        (f"{v1_base}/profile/{probe_addr}",                          h_apikey, "v1 profile"),
+
+        # === Legacy / superseded ===
+        (f"{base}/address/ethereum/{probe_addr}/labels",             h_apikey, "beta labels (old)"),
     ]
 
     attempts = []
@@ -836,4 +858,43 @@ def fix_cleanup_orphans(db: Session = Depends(get_db)):
         "status": "ok",
         "pending_launch_candidates_deleted": pending_deleted,
         "old_unalerted_exploits_deleted": exploit_deleted,
+    }
+
+
+@router.get("/nansen-probe")
+async def nansen_probe(
+    url: str = Query(..., description="Full URL to probe"),
+    header: str = Query("apiKey", description="Header name: apiKey | authorization-bearer"),
+):
+    """
+    User-driven Nansen probe. Call this with any URL from your Nansen
+    dashboard's API examples to verify that our NANSEN_API_KEY works
+    against it. Returns the HTTP status, latency, and body preview.
+
+    Examples:
+      GET /api/diagnostics/nansen-probe?url=https://api.nansen.ai/api/beta/profile/0x...
+      GET /api/diagnostics/nansen-probe?url=https://api.nansen.ai/api/beta/wallet-profiler/ethereum/0x...&header=apiKey
+
+    Once you find a 200-returning URL, paste it in chat and I'll wire
+    the nansen_client.py to use that endpoint.
+    """
+    if not nansen.configured:
+        return {"error": "NANSEN_API_KEY is not set"}
+    if header.lower() == "authorization-bearer":
+        headers = {"Authorization": f"Bearer {nansen.key}", "accept": "application/json"}
+    else:
+        headers = {"apiKey": nansen.key, "accept": "application/json"}
+
+    r = await _http_probe(url, headers=headers)
+    return {
+        "url_probed": url,
+        "header_style": header,
+        "status": r.get("status"),
+        "ok": r.get("ok"),
+        "latency_ms": r.get("ms"),
+        "error": r.get("error"),
+        "body_preview": r.get("preview"),
+        "full_response_available": (
+            "This endpoint only returns a preview. Run from a shell for full body."
+        ),
     }

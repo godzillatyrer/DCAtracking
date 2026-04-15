@@ -17,6 +17,114 @@ const statusColors = {
   unknown:         { bg: '#222',     color: '#888',   label: 'UNKNOWN' },
 };
 
+function NansenCustomProbe() {
+  const [url, setUrl] = useState('');
+  const [header, setHeader] = useState('apiKey');
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  async function run(e) {
+    e?.stopPropagation?.();
+    if (!url.trim()) return;
+    setBusy(true);
+    try {
+      const qs = new URLSearchParams({ url: url.trim(), header }).toString();
+      const resp = await fetch(`/api/diagnostics/nansen-probe?${qs}`);
+      const data = await resp.json();
+      setResult(data);
+    } catch (err) {
+      setResult({ error: err.message });
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        marginTop: '10px',
+        padding: '10px',
+        background: '#0a0a0f',
+        borderRadius: '4px',
+        border: '1px solid #223',
+      }}
+    >
+      <div style={{ color: '#44aaff', fontSize: '11px', marginBottom: '6px', fontWeight: 'bold' }}>
+        TEST A CUSTOM URL (paste any endpoint from your Nansen dashboard)
+      </div>
+      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+        <input
+          type="text"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://api.nansen.ai/api/beta/profile/0x..."
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            flex: 1,
+            background: '#111',
+            border: '1px solid #333',
+            color: '#fff',
+            padding: '6px 8px',
+            borderRadius: '3px',
+            fontSize: '11px',
+            fontFamily: 'monospace',
+          }}
+        />
+        <select
+          value={header}
+          onChange={(e) => setHeader(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            background: '#111',
+            border: '1px solid #333',
+            color: '#fff',
+            padding: '6px',
+            borderRadius: '3px',
+            fontSize: '11px',
+          }}
+        >
+          <option value="apiKey">apiKey header</option>
+          <option value="authorization-bearer">Bearer</option>
+        </select>
+        <button
+          disabled={busy || !url.trim()}
+          onClick={run}
+          style={{
+            background: busy ? '#222' : '#1a1a2e',
+            border: '1px solid #44aaff',
+            color: busy ? '#555' : '#44aaff',
+            padding: '6px 14px',
+            borderRadius: '3px',
+            cursor: busy || !url.trim() ? 'default' : 'pointer',
+            fontSize: '11px',
+            fontWeight: 'bold',
+          }}
+        >
+          {busy ? '...' : 'Test'}
+        </button>
+      </div>
+      {result && (
+        <div style={{ marginTop: '8px', fontSize: '11px', fontFamily: 'monospace' }}>
+          <span style={{
+            color: result.status === 200 ? '#44ff88' : '#ff8888',
+            fontWeight: 'bold',
+          }}>
+            [{result.status ?? 'err'}]
+          </span>{' '}
+          <span style={{ color: '#888' }}>{result.latency_ms}ms</span>
+          {result.error && <span style={{ color: '#ff8888' }}> — {result.error}</span>}
+          {result.body_preview && (
+            <div style={{ color: '#aaa', marginTop: '4px', whiteSpace: 'pre-wrap' }}>
+              {result.body_preview}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function StatusBadge({ status }) {
   const c = statusColors[status] || statusColors.unknown;
   return (
@@ -155,6 +263,9 @@ function APIRow({ api }) {
             <div style={{ color: '#44ff88', fontSize: '11px', marginBottom: '6px' }}>
               Working URL: <code>{api.working_url}</code>
             </div>
+          )}
+          {api.name === 'Nansen' && (
+            <NansenCustomProbe />
           )}
           {api.last_job_error && (
             <div style={{
