@@ -235,7 +235,7 @@ async def _check_nansen() -> dict:
     if not nansen.configured:
         return {
             "configured": False, "status": "not_configured",
-            "detail": "NANSEN_API_KEY is empty (optional, paid $150+/mo)",
+            "detail": "NANSEN_API_KEY is empty (optional paid API — pricing varies by tier)",
         }
 
     probe_addr = "0x28c6c06298d514db089934071355e5743bf21d60"  # Binance hot wallet
