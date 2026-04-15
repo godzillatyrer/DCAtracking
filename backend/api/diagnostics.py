@@ -227,10 +227,19 @@ async def _check_helius() -> dict:
 
 async def _check_nansen() -> dict:
     """
-    Probe Nansen with the correct transport. Per docs.nansen.ai:
-      - Base URL: https://api.nansen.ai/api/v1 (beta deprecated 2025-10-01)
-      - Header:   apikey (lowercase)
-      - Method:   POST with JSON body — GETs always 404
+    CREDIT-SAFE Nansen health check.
+
+    Nansen is credit-metered (observed: /smart-money/holdings = 5
+    credits/call). Running this check on every audit / page refresh
+    would drain the user's credit balance at ~60 credits/hr. Instead
+    we:
+      - Report "configured" purely from NANSEN_API_KEY presence
+      - Surface the in-process counter `calls_today` + `cap_hit`
+      - Surface the timestamp of the last actually-successful Nansen
+        call (from nansen.last_success_at) so the user sees verified
+        connectivity without us burning credits to verify it
+      - Offer the user-triggered custom probe endpoint for on-demand
+        verification (see /api/diagnostics/nansen-probe)
     """
     if not nansen.configured:
         return {
@@ -238,63 +247,39 @@ async def _check_nansen() -> dict:
             "detail": "NANSEN_API_KEY is empty (optional paid API — pricing varies by tier)",
         }
 
-    probe_addr = "0x28c6c06298d514db089934071355e5743bf21d60"  # Binance hot wallet
-    base = nansen.base.rstrip("/")
-    h_apikey = {
-        "apikey": nansen.key,
-        "accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-    # Documented POST endpoints in priority order.
-    candidates = [
-        (f"{base}/smart-money/holdings",
-         {"chains": ["ethereum"], "pagination": {"page": 1, "per_page": 1}},
-         "smart-money/holdings (docs quickstart)"),
-        (f"{base}/smart-money/netflow",
-         {"chains": ["ethereum"], "pagination": {"page": 1, "per_page": 1}},
-         "smart-money/netflow"),
-        (f"{base}/profiler/address/balances",
-         {"addresses": [probe_addr], "chains": ["ethereum"]},
-         "profiler/address/balances"),
-        (f"{base}/profiler/address/transactions",
-         {"address": probe_addr, "chains": ["ethereum"],
-          "pagination": {"page": 1, "per_page": 1}},
-         "profiler/address/transactions"),
+    last = nansen.last_success_at
+    last_iso = last.isoformat() if last else None
+    detail_parts = [
+        f"configured, {nansen.calls_today}/{settings.NANSEN_DAILY_CALL_CAP} "
+        f"daily calls used",
     ]
+    if last:
+        mins = int((datetime.utcnow() - last).total_seconds() / 60)
+        if mins < 60:
+            detail_parts.append(f"last 200 response: {mins} min ago")
+        else:
+            detail_parts.append(f"last 200 response: {mins // 60}h {mins % 60}m ago")
+    else:
+        detail_parts.append("no live calls yet this process")
 
-    attempts = []
-    for url, body, label in candidates:
-        r = await _http_probe(url, headers=h_apikey, method="POST", json_body=body)
-        attempts.append({
-            "endpoint": label,
-            "url": url,
-            "status": r.get("status"),
-            "error": r.get("error"),
-            "preview": r.get("preview", "")[:160],
-        })
-        if r["ok"]:
-            return {
-                "configured": True, "status": "ok", "latency_ms": r["ms"],
-                "detail": f"{label} ok",
-                "working_url": url,
-            }
+    if nansen.cap_hit:
+        return {
+            "configured": True, "status": "error",
+            "latency_ms": 0,
+            "detail": " — ".join(detail_parts),
+            "error": (
+                f"Daily call cap reached ({settings.NANSEN_DAILY_CALL_CAP}). "
+                f"Raise NANSEN_DAILY_CALL_CAP or wait until UTC midnight."
+            ),
+            "calls_today": nansen.calls_today,
+            "last_success_at": last_iso,
+        }
 
     return {
-        "configured": True, "status": "error",
-        "error": (
-            f"All {len(candidates)} documented endpoints failed — "
-            "see per-endpoint status codes below."
-        ),
-        "attempts": attempts,
-        "hint": (
-            "status=401 → NANSEN_API_KEY is invalid or expired. "
-            "status=403 → endpoint not included in your plan "
-            "(e.g. Standard vs Pro). "
-            "status=404 → NANSEN_BASE_URL wrong; correct value is "
-            "https://api.nansen.ai/api/v1. "
-            "status=429 → rate-limited (20/s, 500/min)."
-        ),
+        "configured": True, "status": "ok", "latency_ms": 0,
+        "detail": " — ".join(detail_parts) + " (live probe disabled to save credits)",
+        "calls_today": nansen.calls_today,
+        "last_success_at": last_iso,
     }
 
 
@@ -415,10 +400,12 @@ async def api_status(
             "error": entry.get("error"),
             # Extra diagnostic fields some checks populate — e.g. Nansen
             # returns `attempts` (per-URL probe matrix) + `hint` to help
-            # the user diagnose plan/URL/auth issues.
+            # the user diagnose plan/URL/auth issues, plus credit counter.
             "attempts": entry.get("attempts"),
             "hint": entry.get("hint"),
             "working_url": entry.get("working_url"),
+            "calls_today": entry.get("calls_today"),
+            "last_success_at": entry.get("last_success_at"),
             "last_job_error": _last_error_for(db, name),
             "checked_at": datetime.utcnow().isoformat(),
         })
