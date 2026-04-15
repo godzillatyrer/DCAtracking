@@ -111,6 +111,51 @@ function APIRow({ api }) {
               <b>Live error:</b> {api.error}
             </div>
           )}
+          {api.hint && (
+            <div style={{
+              color: '#ffaa00',
+              marginBottom: '6px',
+              fontSize: '11px',
+              fontStyle: 'italic',
+            }}>
+              Hint: {api.hint}
+            </div>
+          )}
+          {api.attempts && api.attempts.length > 0 && (
+            <div style={{
+              padding: '8px',
+              background: '#0a0a0f',
+              borderRadius: '4px',
+              marginBottom: '8px',
+              fontFamily: 'monospace',
+              fontSize: '11px',
+            }}>
+              <div style={{ color: '#666', marginBottom: '4px' }}>PROBE ATTEMPTS:</div>
+              {api.attempts.map((a, i) => (
+                <div key={i} style={{ color: '#aaa', marginBottom: '6px' }}>
+                  <span style={{
+                    color: a.status === 200 ? '#44ff88' : '#ff8888',
+                  }}>
+                    [{a.status || '—'}]
+                  </span>{' '}
+                  <span style={{ color: '#888' }}>{a.endpoint}</span>
+                  <div style={{ color: '#555', fontSize: '10px', marginLeft: '32px' }}>
+                    {a.url}
+                  </div>
+                  {a.preview && (
+                    <div style={{ color: '#666', fontSize: '10px', marginLeft: '32px' }}>
+                      {a.preview}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {api.working_url && (
+            <div style={{ color: '#44ff88', fontSize: '11px', marginBottom: '6px' }}>
+              Working URL: <code>{api.working_url}</code>
+            </div>
+          )}
           {api.last_job_error && (
             <div style={{
               padding: '8px',

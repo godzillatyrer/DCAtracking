@@ -124,18 +124,85 @@ async def _check_arkham() -> dict:
         return {"configured": True, "status": "error", "error": str(e)[:200]}
 
 
+async def _http_probe(
+    url: str,
+    headers: dict | None = None,
+    *,
+    expect_json: bool = True,
+) -> dict:
+    """
+    Make a single GET with full error detail. Replaces the 'empty/null'
+    output of the client wrappers — we need to see HTTP status, body
+    preview, exception type for triage.
+    """
+    t0 = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=headers or {})
+            ms = int((time.time() - t0) * 1000)
+            preview = resp.text[:180]
+            if resp.status_code == 200:
+                if expect_json:
+                    try:
+                        data = resp.json()
+                        return {"ok": True, "ms": ms, "status": 200, "data": data, "preview": preview}
+                    except Exception as e:
+                        return {
+                            "ok": False, "ms": ms, "status": 200,
+                            "error": f"200 OK but response isn't JSON: {e}",
+                            "preview": preview,
+                        }
+                return {"ok": True, "ms": ms, "status": 200, "data": resp.text, "preview": preview}
+            return {
+                "ok": False, "ms": ms, "status": resp.status_code,
+                "error": f"HTTP {resp.status_code}",
+                "preview": preview,
+            }
+    except httpx.TimeoutException:
+        return {"ok": False, "ms": int((time.time() - t0) * 1000), "error": "timeout"}
+    except Exception as e:
+        return {"ok": False, "ms": int((time.time() - t0) * 1000), "error": str(e)[:180]}
+
+
 async def _check_defillama() -> dict:
-    ok, ms, _, err = await _timed(defillama._get(f"{defillama.base}/chains"))
-    if ok:
-        return {"configured": True, "status": "ok", "latency_ms": ms, "detail": "chains list ok"}
-    return {"configured": True, "status": "error", "latency_ms": ms, "error": err, "detail": "public API (no key needed)"}
+    r = await _http_probe(f"{defillama.base}/chains")
+    if r["ok"]:
+        count = len(r["data"]) if isinstance(r["data"], list) else None
+        return {
+            "configured": True, "status": "ok", "latency_ms": r["ms"],
+            "detail": f"chains list ok ({count} chains)" if count else "chains list ok",
+        }
+    return {
+        "configured": True, "status": "error", "latency_ms": r["ms"],
+        "error": f"{r.get('error')} — preview: {r.get('preview','')}".strip(),
+        "detail": "public API (no key needed)",
+    }
 
 
 async def _check_geckoterminal() -> dict:
-    ok, ms, detail, err = await _timed(geckoterminal._get("/networks"))
-    if ok:
-        return {"configured": True, "status": "ok", "latency_ms": ms, "detail": "networks list ok"}
-    return {"configured": True, "status": "error", "latency_ms": ms, "error": err, "detail": "public API (no key needed)"}
+    # GeckoTerminal recommends an explicit Accept header for API stability
+    headers = {"Accept": "application/json;version=20230302"}
+    r = await _http_probe(f"{geckoterminal.base}/networks", headers=headers)
+    if r["ok"]:
+        data = r["data"] if isinstance(r["data"], dict) else {}
+        count = len((data.get("data") or []))
+        return {
+            "configured": True, "status": "ok", "latency_ms": r["ms"],
+            "detail": f"networks list ok ({count} networks)",
+        }
+    # Rate limit is worth calling out so the user doesn't think it's broken
+    status = r.get("status")
+    if status == 429:
+        return {
+            "configured": True, "status": "error", "latency_ms": r["ms"],
+            "error": "HTTP 429 — GeckoTerminal rate-limited. Limit is 30 req/min on the free tier.",
+            "detail": "public API (no key needed)",
+        }
+    return {
+        "configured": True, "status": "error", "latency_ms": r["ms"],
+        "error": f"{r.get('error')} — preview: {r.get('preview','')[:120]}".strip(),
+        "detail": "public API (no key needed)",
+    }
 
 
 async def _check_helius() -> dict:
@@ -148,13 +215,74 @@ async def _check_helius() -> dict:
 
 
 async def _check_nansen() -> dict:
+    """
+    Probe multiple known Nansen endpoint patterns — the exact path varies
+    by plan tier (Standard/Pro/Pro+). We try a handful in priority order
+    and report WHICH one worked (or, if none work, HTTP status + body
+    preview for each so the user can tell if it's auth, URL, or plan).
+    """
     if not nansen.configured:
-        return {"configured": False, "status": "not_configured", "detail": "NANSEN_API_KEY is empty (optional, paid $150/mo)"}
-    # Nansen — cheap label lookup
-    ok, ms, _, err = await _timed(nansen.label_address("ethereum", "0x28c6c06298d514db089934071355e5743bf21d60"))
-    if ok:
-        return {"configured": True, "status": "ok", "latency_ms": ms, "detail": "label lookup ok"}
-    return {"configured": True, "status": "error", "latency_ms": ms, "error": err}
+        return {
+            "configured": False, "status": "not_configured",
+            "detail": "NANSEN_API_KEY is empty (optional, paid $150+/mo)",
+        }
+
+    # Well-known Ethereum address (Binance hot) — safe probe target
+    probe_addr = "0x28c6c06298d514db089934071355e5743bf21d60"
+    base = nansen.base.rstrip("/")
+
+    # Candidate endpoints + auth header shapes (Nansen has used several
+    # over the years — apiKey header is current, but we also try
+    # Authorization: Bearer for forward compatibility).
+    candidates = [
+        # (url, headers, endpoint_label)
+        (f"{base}/address/ethereum/{probe_addr}/labels",
+         {"apiKey": nansen.key, "accept": "application/json"},
+         "labels endpoint (beta)"),
+        (f"{base}/profiler/address/{probe_addr}/labels",
+         {"apiKey": nansen.key, "accept": "application/json"},
+         "profiler labels"),
+        (f"{base.replace('/beta', '/v1')}/address/ethereum/{probe_addr}/labels",
+         {"apiKey": nansen.key, "accept": "application/json"},
+         "v1 labels"),
+        (f"{base}/profile/{probe_addr}",
+         {"Authorization": f"Bearer {nansen.key}", "accept": "application/json"},
+         "profile (Bearer auth)"),
+    ]
+
+    attempts = []
+    for url, headers, label in candidates:
+        r = await _http_probe(url, headers=headers)
+        attempts.append({
+            "endpoint": label,
+            "url": url,
+            "status": r.get("status"),
+            "error": r.get("error"),
+            "preview": r.get("preview", "")[:120],
+        })
+        if r["ok"]:
+            return {
+                "configured": True, "status": "ok", "latency_ms": r["ms"],
+                "detail": f"{label} ok",
+                "working_url": url,
+            }
+
+    # None worked — return the full attempt matrix so the user can see
+    # whether it's 401 (wrong key), 404 (wrong path), 403 (wrong plan), etc.
+    return {
+        "configured": True, "status": "error",
+        "error": (
+            f"All {len(candidates)} endpoint patterns failed. "
+            f"Most common cause: Pro/Pro+ tier uses a different base URL "
+            f"than the default. Override NANSEN_BASE_URL env var."
+        ),
+        "attempts": attempts,
+        "hint": (
+            "If attempts show status=401 → auth/key issue. "
+            "status=403 → your plan doesn't include this endpoint. "
+            "status=404 → wrong URL; check Nansen dashboard for your base URL."
+        ),
+    }
 
 
 async def _check_gmgn() -> dict:
@@ -272,6 +400,12 @@ async def api_status(
             "latency_ms": entry.get("latency_ms"),
             "detail": entry.get("detail"),
             "error": entry.get("error"),
+            # Extra diagnostic fields some checks populate — e.g. Nansen
+            # returns `attempts` (per-URL probe matrix) + `hint` to help
+            # the user diagnose plan/URL/auth issues.
+            "attempts": entry.get("attempts"),
+            "hint": entry.get("hint"),
+            "working_url": entry.get("working_url"),
             "last_job_error": _last_error_for(db, name),
             "checked_at": datetime.utcnow().isoformat(),
         })
