@@ -115,6 +115,12 @@ class Settings(BaseSettings):
     # cannot be estimated to be above this threshold.
     WALLET_TRACK_MIN_USD: float = 500.0
 
+    # Max wallets scanned per wallet_tracker run. With 500+ seeded known
+    # wallets and ~10 RPC calls per wallet, scanning all of them in one
+    # run exceeded the 30-min interval and caused the job to go stale.
+    # 50/run × 30-min interval = rotate the full list roughly every 5-6 hours.
+    WALLET_TRACK_BATCH_SIZE: int = 50
+
     class Config:
         env_file = ".env"
         case_sensitive = True

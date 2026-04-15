@@ -234,20 +234,39 @@ async def _check_nansen() -> dict:
     # Candidate endpoints + auth header shapes (Nansen has used several
     # over the years — apiKey header is current, but we also try
     # Authorization: Bearer for forward compatibility).
+    # Nansen Pro API surface varies by plan. We probe every pattern we
+    # know of — the 404 responses are valuable because they confirm the
+    # server SAW the request (key + path reached Nansen) but the path
+    # wasn't recognized. Any 200 identifies the correct base + path for
+    # the user's specific plan.
+    h_apikey = {"apiKey": nansen.key, "accept": "application/json"}
+    v1_base = base.replace("/beta", "/v1")
     candidates = [
-        # (url, headers, endpoint_label)
-        (f"{base}/address/ethereum/{probe_addr}/labels",
-         {"apiKey": nansen.key, "accept": "application/json"},
-         "labels endpoint (beta)"),
-        (f"{base}/profiler/address/{probe_addr}/labels",
-         {"apiKey": nansen.key, "accept": "application/json"},
-         "profiler labels"),
-        (f"{base.replace('/beta', '/v1')}/address/ethereum/{probe_addr}/labels",
-         {"apiKey": nansen.key, "accept": "application/json"},
-         "v1 labels"),
+        # Standard/Profiler paths
+        (f"{base}/address/ethereum/{probe_addr}/labels",             h_apikey, "beta labels"),
+        (f"{base}/profiler/address/{probe_addr}/labels",             h_apikey, "beta profiler labels"),
+        (f"{v1_base}/address/ethereum/{probe_addr}/labels",          h_apikey, "v1 labels"),
+        (f"{v1_base}/profiler/address/{probe_addr}",                 h_apikey, "v1 profiler address"),
+
+        # Smart Money endpoints
+        (f"{base}/smart-money/ethereum/wallets",                     h_apikey, "beta smart-money wallets"),
+        (f"{v1_base}/smart-money/ethereum/wallets",                  h_apikey, "v1 smart-money wallets"),
+
+        # TokenGod Mode (Pro tier flagship feature)
+        (f"{base}/tgm/profile/ethereum/{probe_addr}",                h_apikey, "beta tgm profile"),
+        (f"{v1_base}/tgm/profile/ethereum/{probe_addr}",             h_apikey, "v1 tgm profile"),
+        (f"{base}/token-god-mode/ethereum/{probe_addr}",             h_apikey, "token-god-mode"),
+
+        # Alternate Pro base URLs some tiers use
+        ("https://api.nansen.ai/api/pro/address/ethereum/" + probe_addr + "/labels",
+                                                                      h_apikey, "pro labels"),
+        ("https://api.nansen.ai/v1/address/ethereum/" + probe_addr + "/labels",
+                                                                      h_apikey, "root-v1 labels"),
+
+        # Sanity fallback — confirms auth header format is correct
         (f"{base}/profile/{probe_addr}",
          {"Authorization": f"Bearer {nansen.key}", "accept": "application/json"},
-         "profile (Bearer auth)"),
+         "profile (Bearer auth sanity check)"),
     ]
 
     attempts = []
