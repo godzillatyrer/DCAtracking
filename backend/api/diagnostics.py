@@ -133,17 +133,23 @@ async def _http_probe(
     url: str,
     headers: dict | None = None,
     *,
+    method: str = "GET",
+    json_body: dict | None = None,
     expect_json: bool = True,
 ) -> dict:
     """
-    Make a single GET with full error detail. Replaces the 'empty/null'
-    output of the client wrappers — we need to see HTTP status, body
-    preview, exception type for triage.
+    Make a single HTTP request with full error detail. Replaces the
+    'empty/null' output of the client wrappers — we need to see HTTP
+    status, body preview, exception type for triage. Supports POST
+    because Nansen's data endpoints are POST-only.
     """
     t0 = time.time()
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=headers or {})
+            if method.upper() == "POST":
+                resp = await client.post(url, headers=headers or {}, json=json_body or {})
+            else:
+                resp = await client.get(url, headers=headers or {})
             ms = int((time.time() - t0) * 1000)
             preview = resp.text[:180]
             if resp.status_code == 200:
@@ -221,10 +227,10 @@ async def _check_helius() -> dict:
 
 async def _check_nansen() -> dict:
     """
-    Probe multiple known Nansen endpoint patterns — the exact path varies
-    by plan tier (Standard/Pro/Pro+). We try a handful in priority order
-    and report WHICH one worked (or, if none work, HTTP status + body
-    preview for each so the user can tell if it's auth, URL, or plan).
+    Probe Nansen with the correct transport. Per docs.nansen.ai:
+      - Base URL: https://api.nansen.ai/api/v1 (beta deprecated 2025-10-01)
+      - Header:   apikey (lowercase)
+      - Method:   POST with JSON body — GETs always 404
     """
     if not nansen.configured:
         return {
@@ -232,57 +238,40 @@ async def _check_nansen() -> dict:
             "detail": "NANSEN_API_KEY is empty (optional, paid $150+/mo)",
         }
 
-    # Well-known Ethereum address (Binance hot) — safe probe target
-    probe_addr = "0x28c6c06298d514db089934071355e5743bf21d60"
+    probe_addr = "0x28c6c06298d514db089934071355e5743bf21d60"  # Binance hot wallet
     base = nansen.base.rstrip("/")
+    h_apikey = {
+        "apikey": nansen.key,
+        "accept": "application/json",
+        "Content-Type": "application/json",
+    }
 
-    # Candidate endpoints + auth header shapes (Nansen has used several
-    # over the years — apiKey header is current, but we also try
-    # Authorization: Bearer for forward compatibility).
-    # Nansen Pro API surface varies by plan. We probe every pattern we
-    # know of — the 404 responses are valuable because they confirm the
-    # server SAW the request (key + path reached Nansen) but the path
-    # wasn't recognized. Any 200 identifies the correct base + path for
-    # the user's specific plan.
-    h_apikey = {"apiKey": nansen.key, "accept": "application/json"}
-    v1_base = base.replace("/beta", "/v1")
+    # Documented POST endpoints in priority order.
     candidates = [
-        # Standard/Profiler paths
-        (f"{base}/address/ethereum/{probe_addr}/labels",             h_apikey, "beta labels"),
-        (f"{base}/profiler/address/{probe_addr}/labels",             h_apikey, "beta profiler labels"),
-        (f"{v1_base}/address/ethereum/{probe_addr}/labels",          h_apikey, "v1 labels"),
-        (f"{v1_base}/profiler/address/{probe_addr}",                 h_apikey, "v1 profiler address"),
-
-        # Smart Money endpoints
-        (f"{base}/smart-money/ethereum/wallets",                     h_apikey, "beta smart-money wallets"),
-        (f"{v1_base}/smart-money/ethereum/wallets",                  h_apikey, "v1 smart-money wallets"),
-
-        # TokenGod Mode (Pro tier flagship feature)
-        (f"{base}/tgm/profile/ethereum/{probe_addr}",                h_apikey, "beta tgm profile"),
-        (f"{v1_base}/tgm/profile/ethereum/{probe_addr}",             h_apikey, "v1 tgm profile"),
-        (f"{base}/token-god-mode/ethereum/{probe_addr}",             h_apikey, "token-god-mode"),
-
-        # Alternate Pro base URLs some tiers use
-        ("https://api.nansen.ai/api/pro/address/ethereum/" + probe_addr + "/labels",
-                                                                      h_apikey, "pro labels"),
-        ("https://api.nansen.ai/v1/address/ethereum/" + probe_addr + "/labels",
-                                                                      h_apikey, "root-v1 labels"),
-
-        # Sanity fallback — confirms auth header format is correct
-        (f"{base}/profile/{probe_addr}",
-         {"Authorization": f"Bearer {nansen.key}", "accept": "application/json"},
-         "profile (Bearer auth sanity check)"),
+        (f"{base}/smart-money/holdings",
+         {"chains": ["ethereum"], "pagination": {"page": 1, "per_page": 1}},
+         "smart-money/holdings (docs quickstart)"),
+        (f"{base}/smart-money/netflow",
+         {"chains": ["ethereum"], "pagination": {"page": 1, "per_page": 1}},
+         "smart-money/netflow"),
+        (f"{base}/profiler/address/balances",
+         {"addresses": [probe_addr], "chains": ["ethereum"]},
+         "profiler/address/balances"),
+        (f"{base}/profiler/address/transactions",
+         {"address": probe_addr, "chains": ["ethereum"],
+          "pagination": {"page": 1, "per_page": 1}},
+         "profiler/address/transactions"),
     ]
 
     attempts = []
-    for url, headers, label in candidates:
-        r = await _http_probe(url, headers=headers)
+    for url, body, label in candidates:
+        r = await _http_probe(url, headers=h_apikey, method="POST", json_body=body)
         attempts.append({
             "endpoint": label,
             "url": url,
             "status": r.get("status"),
             "error": r.get("error"),
-            "preview": r.get("preview", "")[:120],
+            "preview": r.get("preview", "")[:160],
         })
         if r["ok"]:
             return {
@@ -291,20 +280,20 @@ async def _check_nansen() -> dict:
                 "working_url": url,
             }
 
-    # None worked — return the full attempt matrix so the user can see
-    # whether it's 401 (wrong key), 404 (wrong path), 403 (wrong plan), etc.
     return {
         "configured": True, "status": "error",
         "error": (
-            f"All {len(candidates)} endpoint patterns failed. "
-            f"Most common cause: Pro/Pro+ tier uses a different base URL "
-            f"than the default. Override NANSEN_BASE_URL env var."
+            f"All {len(candidates)} documented endpoints failed — "
+            "see per-endpoint status codes below."
         ),
         "attempts": attempts,
         "hint": (
-            "If attempts show status=401 → auth/key issue. "
-            "status=403 → your plan doesn't include this endpoint. "
-            "status=404 → wrong URL; check Nansen dashboard for your base URL."
+            "status=401 → NANSEN_API_KEY is invalid or expired. "
+            "status=403 → endpoint not included in your plan "
+            "(e.g. Standard vs Pro). "
+            "status=404 → NANSEN_BASE_URL wrong; correct value is "
+            "https://api.nansen.ai/api/v1. "
+            "status=429 → rate-limited (20/s, 500/min)."
         ),
     }
 
@@ -836,4 +825,65 @@ def fix_cleanup_orphans(db: Session = Depends(get_db)):
         "status": "ok",
         "pending_launch_candidates_deleted": pending_deleted,
         "old_unalerted_exploits_deleted": exploit_deleted,
+    }
+
+
+@router.get("/nansen-probe")
+async def nansen_probe(
+    url: str = Query(..., description="Full URL to probe"),
+    header: str = Query("apikey", description="Header: apikey | authorization-bearer"),
+    method: str = Query("POST", description="HTTP method: POST (default) or GET"),
+    body: str = Query(
+        '{"chains": ["ethereum"], "pagination": {"page": 1, "per_page": 1}}',
+        description="JSON body for POST (default: smart-money/holdings sample)",
+    ),
+):
+    """
+    User-driven Nansen probe. Call this with any URL from docs.nansen.ai
+    to verify that our NANSEN_API_KEY works against it. Defaults to POST
+    with a smart-money/holdings-shaped body since most Nansen endpoints
+    are POST.
+
+    Example:
+      /api/diagnostics/nansen-probe?url=https://api.nansen.ai/api/v1/smart-money/holdings
+    """
+    import json as _json
+
+    if not nansen.configured:
+        return {"error": "NANSEN_API_KEY is not set"}
+
+    if header.lower() == "authorization-bearer":
+        headers = {
+            "Authorization": f"Bearer {nansen.key}",
+            "accept": "application/json",
+            "Content-Type": "application/json",
+        }
+    else:
+        # Docs spec: lowercase apikey
+        headers = {
+            "apikey": nansen.key,
+            "accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+    body_json: dict | None = None
+    if method.upper() == "POST":
+        try:
+            body_json = _json.loads(body) if body else {}
+        except Exception as e:
+            return {"error": f"Invalid JSON body: {e}"}
+
+    r = await _http_probe(
+        url, headers=headers, method=method.upper(), json_body=body_json
+    )
+    return {
+        "url_probed": url,
+        "method": method.upper(),
+        "header_style": header,
+        "body_sent": body_json,
+        "status": r.get("status"),
+        "ok": r.get("ok"),
+        "latency_ms": r.get("ms"),
+        "error": r.get("error"),
+        "body_preview": r.get("preview"),
     }
