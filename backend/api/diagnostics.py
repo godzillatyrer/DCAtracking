@@ -808,9 +808,15 @@ def fix_cleanup_orphans(db: Session = Depends(get_db)):
       - LaunchCandidate rows with contract_address starting with 'pending:'
         that never resolved to a real deploy (>7 days old).
       - ExploitCandidate rows older than 30 days with no alert fired.
+      - Bogus abnormal_mint ExploitCandidate rows where the mint ratio
+        was >= 99% of supply (i.e. initial-supply mint, normal
+        token creation, not an exploit). Deletes matching rows + their
+        Alert log entries.
     """
+    from sqlalchemy import and_
     from backend.models.launch_candidate import LaunchCandidate
     from backend.models.exploit_candidate import ExploitCandidate
+    from backend.models.alert import Alert
 
     pending_cutoff = datetime.utcnow() - timedelta(days=7)
     exploit_cutoff = datetime.utcnow() - timedelta(days=30)
@@ -825,11 +831,48 @@ def fix_cleanup_orphans(db: Session = Depends(get_db)):
         ExploitCandidate.alert_fired.is_(False),
     ).delete(synchronize_session=False)
 
+    # Purge initial-supply-mint false positives. An abnormal_mint
+    # candidate whose evidence.pct_minted >= 99 is almost certainly a
+    # new-token deployment (supply was 0 before the mint), not an
+    # exploit. Fetch + filter in Python — volume is bounded and the
+    # JSONB cast syntax isn't portable across SQLAlchemy versions we
+    # support.
+    all_abnormal = db.query(ExploitCandidate).filter(
+        ExploitCandidate.signal_type == "abnormal_mint",
+    ).all()
+    bogus_ids = []
+    bogus_contracts = set()
+    for ec in all_abnormal:
+        ev = ec.evidence or {}
+        pct = ev.get("pct_minted")
+        try:
+            if pct is not None and float(pct) >= 99.0:
+                bogus_ids.append(ec.id)
+                if ec.native_token_contract:
+                    bogus_contracts.add(ec.native_token_contract.lower())
+        except Exception:
+            continue
+
+    bogus_mints_deleted = 0
+    bogus_alerts_deleted = 0
+    if bogus_ids:
+        bogus_mints_deleted = db.query(ExploitCandidate).filter(
+            ExploitCandidate.id.in_(bogus_ids)
+        ).delete(synchronize_session=False)
+        bogus_alerts_deleted = db.query(Alert).filter(
+            and_(
+                Alert.alert_type == "exploit_abnormal_mint",
+                Alert.contract_address.in_(bogus_contracts),
+            )
+        ).delete(synchronize_session=False)
+
     db.commit()
     return {
         "status": "ok",
         "pending_launch_candidates_deleted": pending_deleted,
         "old_unalerted_exploits_deleted": exploit_deleted,
+        "bogus_initial_mint_exploits_deleted": bogus_mints_deleted,
+        "bogus_initial_mint_alerts_deleted": bogus_alerts_deleted,
     }
 
 
