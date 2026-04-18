@@ -88,8 +88,17 @@ class Settings(BaseSettings):
     EXPLOIT_TVL_DROP_PCT: float = 30.0       # >30% drop
     EXPLOIT_TVL_DROP_MINUTES: int = 15       # in <15 minutes
     EXPLOIT_TVL_MIN_PROTOCOL_USD: float = 50_000_000.0  # only for protocols >$50M
+    # Absolute-USD drop trigger: catches drains on protocols where the
+    # percentage move is small but the dollar loss is huge (e.g. a 10%
+    # drop on a $2B protocol = $200M lost). Independent of % threshold.
+    EXPLOIT_TVL_ABS_DROP_USD: float = 50_000_000.0
     EXPLOIT_ABNORMAL_MINT_PCT: float = 5.0   # >5% of circulating in one tx
     EXPLOIT_BRIDGE_DRAIN_MIN_USD: float = 10_000_000.0
+    # DeFi Llama hacks feed — minimum loss in USD to alert. The feed
+    # contains a long historical record; we only ever alert on new
+    # entries first seen in the last EXPLOIT_HACKS_FEED_LOOKBACK_HOURS.
+    EXPLOIT_HACKS_FEED_MIN_USD: float = 5_000_000.0
+    EXPLOIT_HACKS_FEED_LOOKBACK_HOURS: int = 48
 
     # Scoring thresholds (legacy pump scanner — unchanged)
     ALERT_THRESHOLD: int = 70

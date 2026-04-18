@@ -51,6 +51,11 @@ CONFIRMED_PUMPS = [
         "name": "StakeStone",
         "contract": "0xdaf1695c41327b61b9b9965ac6a5843a3198cf07",
     },
+    {
+        "symbol": "DEXE",
+        "name": "DeXe",
+        "contract": "0x6e88056e8376ae7709496ba64d37fa2f8015ce3e",
+    },
 ]
 
 # Known exchange/router addresses to EXCLUDE from holder reconstruction

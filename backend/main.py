@@ -128,17 +128,21 @@ _widen_legacy_columns()
 
 def _cleanup_legacy_data() -> None:
     """
-    One-shot data cleanup at boot to scrub the artifacts of the old
-    wallet_tracker alert spam (5,406 placeholder alerts, stub watchlist
-    entries with bogus cluster counts).
+    One-shot data cleanup at boot to scrub the artifacts of previous
+    buggy behavior:
+      - 5k+ placeholder wallet_tracker alerts with telegram_sent=False
+      - Stub watchlist entries pointing at un-enriched flagged_tokens
+      - 32k+ initial-supply-mint false positives from exploit_watcher
+        (every new BSC token creation was being flagged as "abnormal mint")
 
-    Idempotent: each run only deletes the specific patterns we know are
-    invalid. Real data is never touched.
+    Idempotent: each run only deletes the specific patterns we know
+    are invalid. Real data is never touched.
     """
     from sqlalchemy import or_
     from backend.models.alert import Alert
     from backend.models.flagged_token import FlaggedToken
     from backend.models.watchlist import Watchlist
+    from backend.models.exploit_candidate import ExploitCandidate
 
     db = SessionLocal()
     try:
@@ -172,10 +176,44 @@ def _cleanup_legacy_data() -> None:
             .delete(synchronize_session=False)
         )
 
+        # 3. Delete initial-supply-mint false positives. These are
+        # ExploitCandidate rows whose evidence.pct_minted >= 99 — those
+        # are new token deployments (100% of supply minted in one tx),
+        # which is the NORMAL ERC20 creation pattern, not an exploit.
+        # We fetch + filter in Python because JSONB cast syntax isn't
+        # portable. Bounded by table size and runs once per boot.
+        all_abnormal = db.query(ExploitCandidate).filter(
+            ExploitCandidate.signal_type == "abnormal_mint",
+        ).all()
+        bogus_ids = []
+        bogus_contracts = set()
+        for ec in all_abnormal:
+            ev = ec.evidence or {}
+            pct = ev.get("pct_minted")
+            try:
+                if pct is not None and float(pct) >= 99.0:
+                    bogus_ids.append(ec.id)
+                    if ec.native_token_contract:
+                        bogus_contracts.add(ec.native_token_contract.lower())
+            except Exception:
+                continue
+        deleted_mints = 0
+        deleted_mint_alerts = 0
+        if bogus_ids:
+            deleted_mints = db.query(ExploitCandidate).filter(
+                ExploitCandidate.id.in_(bogus_ids)
+            ).delete(synchronize_session=False)
+            deleted_mint_alerts = db.query(Alert).filter(
+                Alert.alert_type == "exploit_abnormal_mint",
+                Alert.contract_address.in_(bogus_contracts),
+            ).delete(synchronize_session=False)
+
         db.commit()
         logger.info(
-            f"Startup cleanup: removed {deleted_alerts} placeholder alerts "
-            f"and {deleted_watch} stub watchlist entries."
+            f"Startup cleanup: removed {deleted_alerts} placeholder alerts, "
+            f"{deleted_watch} stub watchlist entries, "
+            f"{deleted_mints} bogus abnormal-mint exploit rows "
+            f"(+ {deleted_mint_alerts} associated alert rows)."
         )
     except Exception as e:
         db.rollback()
