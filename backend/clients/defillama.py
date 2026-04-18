@@ -53,7 +53,15 @@ class DeFiLlamaClient:
         return await self._get(f"{self.base}/protocol/{slug}")
 
     async def hacks(self) -> list[dict]:
-        """Historical hacks DB — for correlating detections against known events."""
+        """
+        Historical + recent hacks DB. Each entry typically includes:
+          name, date (unix ts), amount (in USD), chain, classification,
+          technique, bridgeHack, targetType, source, returnedFunds, etc.
+
+        Used by exploit_watcher to surface real-time exploit alerts
+        within minutes — DeFi Llama's security team adds entries
+        promptly after a hack is publicly disclosed.
+        """
         return await self._get(f"{self.base}/hacks") or []
 
     # --- Token historicals ---
