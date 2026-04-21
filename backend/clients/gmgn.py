@@ -30,7 +30,22 @@ class GMGNClient:
 
     async def _get(self, path: str, params: dict | None = None) -> Any | None:
         url = f"{self.base}{path}"
-        headers = {}
+        # Browser-like headers required to pass Cloudflare's bot
+        # protection. Without these, GMGN returns 200 with empty data
+        # for any token-specific query (observed: top_traders, top_holders,
+        # smart_money_trades all return [] for Pump.fun tokens when called
+        # from a server without browser headers).
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://gmgn.ai/",
+            "Origin": "https://gmgn.ai",
+        }
         if self.key:
             headers["Authorization"] = f"Bearer {self.key}"
         try:
@@ -38,6 +53,12 @@ class GMGNClient:
                 resp = await client.get(url, params=params, headers=headers)
                 await asyncio.sleep(0.2)
                 if resp.status_code == 200:
+                    # Cloudflare sometimes returns HTML challenge page
+                    # as 200 — detect by checking content-type.
+                    ct = resp.headers.get("content-type", "")
+                    if "html" in ct.lower():
+                        logger.warning(f"GMGN {path}: Cloudflare HTML challenge")
+                        return None
                     data = resp.json()
                     if isinstance(data, dict) and data.get("code") == 0:
                         return data.get("data")
