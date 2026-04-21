@@ -118,51 +118,99 @@ def _parse_trader(raw: dict) -> dict | None:
     }
 
 
+def _extract_list_from_response(data, label: str = "") -> tuple[list[dict], dict]:
+    """
+    GMGN wraps responses in various shapes depending on the endpoint.
+    This function aggressively unwraps until it finds a list of dicts.
+
+    Returns (items, debug_info) where debug_info shows the response
+    shape for troubleshooting field-name mismatches.
+    """
+    debug: dict = {"label": label, "type": type(data).__name__}
+
+    if data is None:
+        debug["note"] = "response was None"
+        return [], debug
+
+    if isinstance(data, list):
+        debug["count"] = len(data)
+        if data and isinstance(data[0], dict):
+            debug["first_item_keys"] = list(data[0].keys())[:15]
+        return [x for x in data if isinstance(x, dict)], debug
+
+    if isinstance(data, dict):
+        debug["top_keys"] = list(data.keys())[:20]
+        # Try common wrapper keys
+        for key in ("data", "items", "holders", "traders", "list",
+                     "results", "records", "rows", "tokens"):
+            val = data.get(key)
+            if isinstance(val, list) and val:
+                debug["unwrap_key"] = key
+                debug["count"] = len(val)
+                if isinstance(val[0], dict):
+                    debug["first_item_keys"] = list(val[0].keys())[:15]
+                return [x for x in val if isinstance(x, dict)], debug
+        # Maybe the dict itself IS a single record? Or nested one more level.
+        # Try all values that are lists.
+        for k, v in data.items():
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                debug["unwrap_key"] = k
+                debug["count"] = len(v)
+                debug["first_item_keys"] = list(v[0].keys())[:15]
+                return v, debug
+        debug["note"] = "dict had no list-valued key"
+        return [], debug
+
+    debug["note"] = f"unexpected type: {type(data)}"
+    return [], debug
+
+
 async def extract_cabal_wallets(
     mint: str,
     *,
     min_profit_usd: float = DEFAULT_MIN_PROFIT_USD,
     min_profit_mult: float = DEFAULT_MIN_PROFIT_MULT,
     max_wallets: int = DEFAULT_MAX_WALLETS,
-) -> list[dict]:
+) -> tuple[list[dict], dict]:
     """
     Pull top traders + holders for a token mint from GMGN, parse into a
     normalized list, and filter for likely cabal wallets.
 
-    Returns a list of dicts sorted by total_profit_usd descending.
+    Returns (wallets, debug_info) where debug_info shows what GMGN
+    returned at each step (for troubleshooting when wallets_found = 0).
     """
     all_raw: list[dict] = []
+    debug_info: dict = {}
 
     # Pull from multiple GMGN endpoints — different data per endpoint.
-    # top_traders has PnL; top_holders has current balance + % supply.
-    # We merge both and dedup by address.
     try:
-        traders = await gmgn.token_top_traders(mint, limit=100)
-        if isinstance(traders, list):
-            all_raw.extend(traders)
-        elif isinstance(traders, dict):
-            all_raw.extend(traders.get("data") or traders.get("items") or [])
+        traders_raw = await gmgn.token_top_traders(mint, limit=100)
+        items, d = _extract_list_from_response(traders_raw, "top_traders")
+        all_raw.extend(items)
+        debug_info["top_traders"] = d
     except Exception as e:
+        debug_info["top_traders"] = {"error": str(e)[:200]}
         logger.warning(f"GMGN top_traders failed for {mint[:10]}: {e}")
 
     try:
-        holders = await gmgn.token_holders(mint, limit=50)
-        if isinstance(holders, list):
-            all_raw.extend(holders)
-        elif isinstance(holders, dict):
-            all_raw.extend(holders.get("data") or holders.get("items") or [])
+        holders_raw = await gmgn.token_holders(mint, limit=50)
+        items, d = _extract_list_from_response(holders_raw, "top_holders")
+        all_raw.extend(items)
+        debug_info["top_holders"] = d
     except Exception as e:
+        debug_info["top_holders"] = {"error": str(e)[:200]}
         logger.warning(f"GMGN token_holders failed for {mint[:10]}: {e}")
 
     try:
-        smart = await gmgn.smart_money_trades(mint)
-        if isinstance(smart, list):
-            all_raw.extend(smart)
-        elif isinstance(smart, dict):
-            all_raw.extend(smart.get("data") or smart.get("items") or [])
+        smart_raw = await gmgn.smart_money_trades(mint)
+        items, d = _extract_list_from_response(smart_raw, "smart_money_trades")
+        all_raw.extend(items)
+        debug_info["smart_money_trades"] = d
     except Exception as e:
+        debug_info["smart_money_trades"] = {"error": str(e)[:200]}
         logger.warning(f"GMGN smart_money_trades failed for {mint[:10]}: {e}")
 
+    debug_info["total_raw_items"] = len(all_raw)
     logger.info(f"extract_cabal: {len(all_raw)} raw entries from GMGN for {mint[:10]}")
 
     # Parse + dedup
@@ -190,7 +238,9 @@ async def extract_cabal_wallets(
     filtered.sort(key=lambda x: -x["total_profit_usd"])
 
     # Cap
-    return filtered[:max_wallets]
+    debug_info["parsed_count"] = len(seen)
+    debug_info["post_filter_count"] = len(filtered)
+    return filtered[:max_wallets], debug_info
 
 
 def add_cabal_wallets_to_db(
