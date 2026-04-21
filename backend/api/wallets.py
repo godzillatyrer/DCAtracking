@@ -250,3 +250,109 @@ async def get_wallet_balances(
             results[w.wallet_address] = None
 
     return results
+
+
+# ─── Solana cabal extraction ─────────────────────────────────────────
+
+class ExtractFromRunnerRequest(BaseModel):
+    mint: str
+    symbol: str = ""
+    min_profit_usd: float = 5_000.0
+    min_profit_mult: float = 3.0
+    max_wallets: int = 30
+    auto_add: bool = True
+
+
+@router.post("/solana/extract-from-runner")
+async def extract_from_runner(
+    req: ExtractFromRunnerRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Paste a Solana runner CA → extract early profitable wallets from GMGN
+    → optionally auto-add to solana_known_wallets as role='cabal_trader'.
+
+    These wallets then feed into the detection pipeline:
+      - Module 5 alerts when ≥3 of them buy into a new launch early
+      - Module 3 alerts when they fund a fresh wallet that deploys
+      - Graph walk follows their money to discover rotated wallets
+    """
+    from backend.detection.cabal_extractor import (
+        extract_cabal_wallets,
+        add_cabal_wallets_to_db,
+    )
+
+    wallets = await extract_cabal_wallets(
+        req.mint,
+        min_profit_usd=req.min_profit_usd,
+        min_profit_mult=req.min_profit_mult,
+        max_wallets=req.max_wallets,
+    )
+
+    added = 0
+    if req.auto_add and wallets:
+        added = add_cabal_wallets_to_db(
+            db, wallets, req.mint, req.symbol,
+        )
+
+    return {
+        "mint": req.mint,
+        "symbol": req.symbol,
+        "wallets_found": len(wallets),
+        "wallets_added": added,
+        "wallets": [
+            {
+                "address": w["address"],
+                "total_profit_usd": w["total_profit_usd"],
+                "profit_multiplier": w["profit_multiplier"],
+                "cost_usd": w["cost_usd"],
+                "balance_usd": w["balance_usd"],
+                "pct_of_supply": w["pct_of_supply"],
+                "is_smart_money": w["is_smart_money"],
+                "tags": w["tags"],
+            }
+            for w in wallets
+        ],
+    }
+
+
+@router.get("/solana/known")
+def get_solana_known_wallets(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    role: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """List tracked Solana wallets. Filter by role."""
+    from backend.models.solana_known_wallet import SolanaKnownWallet
+
+    query = db.query(SolanaKnownWallet).filter(
+        SolanaKnownWallet.is_active.is_(True)
+    )
+    if role:
+        query = query.filter(SolanaKnownWallet.role == role)
+
+    total = query.count()
+    wallets = query.order_by(SolanaKnownWallet.added_at.desc()).offset(
+        (page - 1) * per_page
+    ).limit(per_page).all()
+
+    return {
+        "items": [
+            {
+                "wallet_address": w.wallet_address,
+                "label": w.label,
+                "role": w.role,
+                "associated_token": w.associated_token,
+                "associated_mint": w.associated_mint,
+                "funding_source": w.funding_source,
+                "total_profit_est": str(w.total_profit_est) if w.total_profit_est else None,
+                "added_at": w.added_at.isoformat() if w.added_at else None,
+                "notes": w.notes,
+            }
+            for w in wallets
+        ],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }

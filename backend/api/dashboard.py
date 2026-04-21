@@ -326,6 +326,7 @@ def get_scan_log_summary(db: Session = Depends(get_db)):
         # Phase 3 — Solana
         "solana_pair_watcher", "solana_deployer_watcher", "solana_whale_fresh",
         "solana_seeder",
+        "solana_graph_walk",
     ]
     summary = []
     for job in jobs:

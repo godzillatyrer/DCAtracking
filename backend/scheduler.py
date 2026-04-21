@@ -47,6 +47,7 @@ from backend.detection.treasury_outflow import run_treasury_outflow
 from backend.detection.solana_pair_watcher import run_solana_pair_watcher
 from backend.detection.solana_deployer_watcher import run_solana_deployer_watcher
 from backend.detection.solana_whale_fresh import run_solana_whale_fresh_watcher
+from backend.detection.solana_graph_walk import run_solana_graph_walk
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +420,7 @@ run_treasury_outflow_job   = _wrap_launch_job("treasury_outflow",   run_treasury
 run_solana_pair_job        = _wrap_launch_job("solana_pair_watcher",     run_solana_pair_watcher)
 run_solana_deployer_job    = _wrap_launch_job("solana_deployer_watcher", run_solana_deployer_watcher)
 run_solana_whale_fresh_job = _wrap_launch_job("solana_whale_fresh",      run_solana_whale_fresh_watcher)
+run_solana_graph_walk_job  = _wrap_launch_job("solana_graph_walk",       run_solana_graph_walk)
 
 
 def setup_scheduler() -> AsyncIOScheduler:
@@ -478,6 +480,7 @@ def setup_scheduler() -> AsyncIOScheduler:
         ("solana_pair_watcher",     "Solana Pair Watcher",     run_solana_pair_job,     {"minutes": settings.SOLANA_PAIR_WATCHER_INTERVAL_MIN},     22),
         ("solana_deployer_watcher", "Solana Deployer Watcher", run_solana_deployer_job, {"minutes": settings.SOLANA_DEPLOYER_WATCHER_INTERVAL_MIN}, 27),
         ("solana_whale_fresh",      "Solana Whale→Fresh",      run_solana_whale_fresh_job, {"minutes": settings.SOLANA_WHALE_FRESH_INTERVAL_MIN},   33),
+        ("solana_graph_walk",       "Solana Graph Walk",       run_solana_graph_walk_job,  {"minutes": 15},  38),
     ]
 
     for job_id, name, fn, trigger_kwargs, offset_min in jobs:
