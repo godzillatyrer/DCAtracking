@@ -43,15 +43,16 @@ router = APIRouter(prefix="/api/diagnostics", tags=["diagnostics"])
 # as a clickable row on the API Status page so you can see WHY something
 # is unhealthy without trawling scan logs.
 ERROR_JOBS_BY_API = {
-    "MegaNode": ["volume_scanner", "profile_checker", "wallet_tracker", "wallet_analyzer", "exchange_flow", "deployer_watcher", "whale_fresh_watcher", "pair_watcher", "exploit_watcher"],
-    "Arkham": ["wallet_seeder", "portfolio_gate"],
-    "DeFi Llama": ["exploit_watcher"],
-    "GeckoTerminal": ["pair_watcher", "solana_pair_watcher"],
-    "Helius": ["solana_pair_watcher", "solana_deployer_watcher", "solana_whale_fresh"],
-    "Nansen": ["portfolio_gate"],
-    "GMGN": ["solana_pair_watcher"],
-    "Telegram": ["wallet_tracker", "scorer", "launch_scorer"],
-    "Anthropic": ["scorer", "launch_scorer"],
+    "MegaNode":       ["volume_scanner", "profile_checker", "wallet_tracker",
+                       "wallet_analyzer", "exchange_flow"],
+    "Arkham":         ["wallet_seeder"],
+    "DeFi Llama":     [],
+    "GeckoTerminal":  [],
+    "Helius":         ["solana_graph_walk"],
+    "Nansen":         [],
+    "GMGN":           [],
+    "Telegram":       ["scorer"],
+    "Anthropic":      ["scorer"],
 }
 
 
@@ -445,27 +446,15 @@ async def api_status(
 
 # Expected interval per scheduler job (for stale detection).
 _JOB_INTERVAL_MIN = {
-    "volume_scanner":           settings.VOLUME_SCAN_INTERVAL,
-    "profile_checker":          settings.PROFILE_CHECK_INTERVAL,
-    "wallet_analyzer":          settings.WALLET_ANALYZE_INTERVAL,
-    "exchange_flow":            settings.EXCHANGE_FLOW_INTERVAL,
-    "social_scanner":           settings.SOCIAL_SCAN_INTERVAL,
-    "wallet_tracker":           settings.WALLET_TRACK_INTERVAL,
-    "scorer":                   settings.SCORE_RECALC_INTERVAL,
-    "cleanup":                  60 * 6,   # 6h
-    "pair_watcher":             settings.PAIR_WATCHER_INTERVAL_MIN,
-    "deployer_watcher":         settings.DEPLOYER_WATCHER_INTERVAL_MIN,
-    "whale_fresh_watcher":      settings.WHALE_FRESH_WATCHER_INTERVAL_MIN,
-    "launch_scorer":            settings.LAUNCH_SCORER_INTERVAL_MIN,
-    "exploit_watcher":          settings.EXPLOIT_WATCHER_INTERVAL_MIN,
-    "operator_graph":           15,
-    "bytecode_match":           30,
-    "portfolio_gate":           60,
-    "launchpad_watcher":        30,
-    "treasury_outflow":         settings.TREASURY_OUTFLOW_INTERVAL_MIN,
-    "solana_pair_watcher":      settings.SOLANA_PAIR_WATCHER_INTERVAL_MIN,
-    "solana_deployer_watcher":  settings.SOLANA_DEPLOYER_WATCHER_INTERVAL_MIN,
-    "solana_whale_fresh":       settings.SOLANA_WHALE_FRESH_INTERVAL_MIN,
+    "volume_scanner":     settings.VOLUME_SCAN_INTERVAL,
+    "profile_checker":    settings.PROFILE_CHECK_INTERVAL,
+    "wallet_analyzer":    settings.WALLET_ANALYZE_INTERVAL,
+    "exchange_flow":      settings.EXCHANGE_FLOW_INTERVAL,
+    "social_scanner":     settings.SOCIAL_SCAN_INTERVAL,
+    "wallet_tracker":     settings.WALLET_TRACK_INTERVAL,
+    "scorer":             settings.SCORE_RECALC_INTERVAL,
+    "cleanup":            60 * 6,
+    "solana_graph_walk":  15,
 }
 
 
@@ -566,12 +555,7 @@ def _check_schema_drift(db: Session) -> list[dict]:
     """
     from sqlalchemy import text as _text
 
-    expected = [
-        ("protocol_tvl_snapshots", "chain",         255),
-        ("protocol_tvl_snapshots", "protocol_slug", 255),
-        ("exploit_candidates",     "chain",         255),
-        ("exploit_candidates",     "protocol_slug", 255),
-    ]
+    expected = []  # No known-too-narrow columns after the cleanup
 
     issues = []
     try:
@@ -770,110 +754,16 @@ def health_audit(db: Session = Depends(get_db)):
 
 @router.post("/fix/widen-columns")
 def fix_widen_columns():
-    """Re-run the _widen_legacy_columns() ALTER migrations.
-
-    Idempotent: Postgres no-ops ALTER TYPE when the target width
-    already matches. Safe to call even when nothing is wrong.
-
-    Returns per-column verification results so the routine can see
-    whether each ALTER actually took effect — a bare "ran" success
-    was previously masking silent failures that kept the schema drift
-    issue alive.
-    """
-    from backend.main import _widen_legacy_columns
-    try:
-        results = _widen_legacy_columns() or {}
-        any_failed = any(
-            "DID NOT TAKE EFFECT" in v or v.startswith("ALTER failed")
-            for v in results.values()
-        )
-        return {
-            "status": "error" if any_failed else "ok",
-            "message": (
-                "widen_legacy_columns ran but one or more ALTERs did not "
-                "take effect — check `columns` below"
-                if any_failed
-                else "widen_legacy_columns ran; all columns verified"
-            ),
-            "columns": results,
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)[:300]}
+    """No-op. All previously-narrow columns belonged to tables that
+    have since been removed. Kept for backwards compat with the routine
+    auto-heal flow."""
+    return {"status": "ok", "message": "no schema-drift fixes needed"}
 
 
 @router.post("/fix/cleanup-orphans")
 def fix_cleanup_orphans(db: Session = Depends(get_db)):
-    """
-    Clean up persistent orphan rows:
-      - LaunchCandidate rows with contract_address starting with 'pending:'
-        that never resolved to a real deploy (>7 days old).
-      - ExploitCandidate rows older than 30 days with no alert fired.
-      - Bogus abnormal_mint ExploitCandidate rows where the mint ratio
-        was >= 99% of supply (i.e. initial-supply mint, normal
-        token creation, not an exploit). Deletes matching rows + their
-        Alert log entries.
-    """
-    from sqlalchemy import and_
-    from backend.models.launch_candidate import LaunchCandidate
-    from backend.models.exploit_candidate import ExploitCandidate
-    from backend.models.alert import Alert
-
-    pending_cutoff = datetime.utcnow() - timedelta(days=7)
-    exploit_cutoff = datetime.utcnow() - timedelta(days=30)
-
-    pending_deleted = db.query(LaunchCandidate).filter(
-        LaunchCandidate.contract_address.like("pending:%"),
-        LaunchCandidate.last_signal_at < pending_cutoff,
-    ).delete(synchronize_session=False)
-
-    exploit_deleted = db.query(ExploitCandidate).filter(
-        ExploitCandidate.detected_at < exploit_cutoff,
-        ExploitCandidate.alert_fired.is_(False),
-    ).delete(synchronize_session=False)
-
-    # Purge initial-supply-mint false positives. An abnormal_mint
-    # candidate whose evidence.pct_minted >= 99 is almost certainly a
-    # new-token deployment (supply was 0 before the mint), not an
-    # exploit. Fetch + filter in Python — volume is bounded and the
-    # JSONB cast syntax isn't portable across SQLAlchemy versions we
-    # support.
-    all_abnormal = db.query(ExploitCandidate).filter(
-        ExploitCandidate.signal_type == "abnormal_mint",
-    ).all()
-    bogus_ids = []
-    bogus_contracts = set()
-    for ec in all_abnormal:
-        ev = ec.evidence or {}
-        pct = ev.get("pct_minted")
-        try:
-            if pct is not None and float(pct) >= 99.0:
-                bogus_ids.append(ec.id)
-                if ec.native_token_contract:
-                    bogus_contracts.add(ec.native_token_contract.lower())
-        except Exception:
-            continue
-
-    bogus_mints_deleted = 0
-    bogus_alerts_deleted = 0
-    if bogus_ids:
-        bogus_mints_deleted = db.query(ExploitCandidate).filter(
-            ExploitCandidate.id.in_(bogus_ids)
-        ).delete(synchronize_session=False)
-        bogus_alerts_deleted = db.query(Alert).filter(
-            and_(
-                Alert.alert_type == "exploit_abnormal_mint",
-                Alert.contract_address.in_(bogus_contracts),
-            )
-        ).delete(synchronize_session=False)
-
-    db.commit()
-    return {
-        "status": "ok",
-        "pending_launch_candidates_deleted": pending_deleted,
-        "old_unalerted_exploits_deleted": exploit_deleted,
-        "bogus_initial_mint_exploits_deleted": bogus_mints_deleted,
-        "bogus_initial_mint_alerts_deleted": bogus_alerts_deleted,
-    }
+    """No-op. Launch/Exploit tables were removed; nothing to clean."""
+    return {"status": "ok", "message": "no orphan rows to clean"}
 
 
 @router.get("/nansen-probe")

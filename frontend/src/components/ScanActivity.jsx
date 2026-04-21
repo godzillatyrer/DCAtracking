@@ -1,58 +1,84 @@
 import React, { useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { formatDate } from '../utils/formatters';
-
-const cardStyle = {
-  background: '#111118',
-  border: '1px solid #222',
-  borderRadius: '8px',
-  padding: '20px',
-  marginBottom: '16px',
-};
+import {
+  colors, typography, spacing, radius,
+  card, pageTitle, pageSubtitle, sectionTitle,
+  buttonPrimary, pill,
+} from '../theme';
 
 const JOB_LABELS = {
-  volume_scanner: { label: 'Volume Scanner', icon: '~15m', desc: 'Scans DEX Screener for BSC volume spikes' },
-  profile_checker: { label: 'Profile Checker', icon: '~30m', desc: 'Enriches tokens via BscScan (supply, holders, contract)' },
-  wallet_analyzer: { label: 'Wallet Analyzer', icon: '~4h', desc: 'Traces holder funding sources for cluster detection' },
-  exchange_flow: { label: 'Exchange Flow', icon: '~30m', desc: 'Monitors deposits/withdrawals to known exchange wallets' },
-  social_scanner: { label: 'Social Scanner', icon: '~2h', desc: 'Checks CoinGecko trending and social mentions' },
-  wallet_tracker: { label: 'Wallet Tracker', icon: '~30m', desc: 'Follows known operator wallets for new activity' },
-  scorer: { label: 'Score Calculator', icon: '~30m', desc: 'Recalculates 0-100 scores for all active tokens' },
-  cleanup: { label: 'Cleanup', icon: '~6h', desc: 'Expires old flagged tokens not seen in 7+ days' },
-  wallet_seeder: { label: 'Wallet Seeder', icon: 'manual', desc: 'Extracts known wallets from confirmed pump tokens (RAVE, SIREN, RIVER, ARIA, STO)' },
-  // Phase 2 — launch + exploit detection
-  pair_watcher:      { label: 'Pair Watcher',      icon: '~5m',  desc: 'New DEX pools + insider early-buyer cluster detection (M4/5/9)' },
-  deployer_watcher:  { label: 'Deployer Watcher',  icon: '~10m', desc: 'New contract deploys from golden deployers + labeled entities (M1/2)' },
-  whale_fresh_watcher: { label: 'Whale→Fresh',     icon: '~10m', desc: 'Tracks whale funding to fresh wallets (TRUMP pattern, M3)' },
-  launch_scorer:     { label: 'Launch Scorer',     icon: '~2m',  desc: 'Aggregates signals → tiered alerts (S/A/B/C)' },
-  exploit_watcher:   { label: 'Exploit Watcher',   icon: '~3m',  desc: 'TVL drops, abnormal mints, bridge drains — short alerts (M14)' },
-  operator_graph:    { label: 'Operator Graph',    icon: '~15m', desc: 'Same-operator + burner sweeping detection (M6/11)' },
-  bytecode_match:    { label: 'Bytecode Match',    icon: '~30m', desc: 'Compares new contract bytecode to confirmed-pump templates (M7)' },
-  portfolio_gate:    { label: 'Portfolio Gate',    icon: '~1h',  desc: 'Filter: deployer holds >$1M in assets (M8)' },
-  launchpad_watcher: { label: 'Launchpad Watcher', icon: '~30m', desc: 'Known wallets receiving launchpad allocations (M12)' },
-  treasury_outflow:  { label: 'Treasury Outflow',  icon: '~30m', desc: 'Treasury/multisig outflows to fresh wallets (M13)' },
-  // Phase 3 — Solana detection
-  solana_pair_watcher:     { label: 'Solana Pair Watcher',     icon: '~7m',  desc: 'New Raydium/Pump.fun pools + Solana insider buyer cluster' },
-  solana_deployer_watcher: { label: 'Solana Deployer Watcher', icon: '~12m', desc: 'New SPL mints — matches mint authority against known operators' },
-  solana_whale_fresh:      { label: 'Solana Whale→Fresh',      icon: '~12m', desc: 'Solana whale SOL transfers to fresh wallets (TRUMP pattern, M3)' },
-  solana_seeder:           { label: 'Solana Seeder',           icon: 'manual', desc: 'Seeds public Solana infrastructure rows + provides chain bootstrap' },
-  solana_graph_walk:       { label: 'Solana Graph Walk',       icon: '~15m',   desc: 'Follows cabal money flow — discovers rotated wallets automatically' },
+  volume_scanner:   { label: 'Volume Scanner',    interval: '15m', desc: 'Scans DEX Screener for BSC volume spikes' },
+  profile_checker:  { label: 'Profile Checker',   interval: '30m', desc: 'Enriches tokens via BscScan (supply, holders, contract)' },
+  wallet_analyzer:  { label: 'Wallet Analyzer',   interval: '4h',  desc: 'Traces holder funding sources for cluster detection' },
+  exchange_flow:    { label: 'Exchange Flow',     interval: '30m', desc: 'Monitors deposits/withdrawals to known exchange wallets' },
+  social_scanner:   { label: 'Social Scanner',    interval: '2h',  desc: 'CoinGecko trending + social mentions' },
+  wallet_tracker:   { label: 'Wallet Tracker',    interval: '30m', desc: 'Follows known operator wallets for new activity' },
+  scorer:           { label: 'Score Calculator',  interval: '30m', desc: 'Recalculates 0–100 scores and fires Telegram alerts' },
+  cleanup:          { label: 'Cleanup',           interval: '6h',  desc: 'Expires old flagged tokens' },
+  wallet_seeder:    { label: 'Wallet Seeder',     interval: 'manual', desc: 'Extracts known wallets from confirmed BSC pumps' },
+  solana_seeder:    { label: 'Solana Seeder',     interval: 'manual', desc: 'Bootstraps Solana infrastructure rows' },
+  solana_graph_walk:{ label: 'Solana Graph Walk', interval: '15m', desc: 'Follows cabal money flow to discover rotated wallets' },
 };
 
-function statusBadge(status) {
-  const colors = {
-    success: { bg: '#113311', color: '#44ff44' },
-    error: { bg: '#331111', color: '#ff4444' },
-    never_run: { bg: '#222', color: '#666' },
+function StatusBadge({ status }) {
+  const variants = {
+    success: { variant: 'success', text: 'Success' },
+    error:   { variant: 'danger',  text: 'Error' },
+    never_run:{ variant: 'default', text: 'Never run' },
   };
-  const c = colors[status] || colors.never_run;
+  const v = variants[status] || { variant: 'default', text: status };
+  return <span style={pill(v.variant)}>{v.text}</span>;
+}
+
+function JobCard({ job }) {
+  const meta = JOB_LABELS[job.job_name] || { label: job.job_name, interval: '?', desc: '' };
   return (
-    <span style={{
-      padding: '2px 8px', borderRadius: '4px', fontSize: '11px',
-      background: c.bg, color: c.color, fontWeight: 'bold',
+    <div style={{
+      ...card,
+      borderColor: job.last_status === 'error' ? colors.danger : colors.border,
     }}>
-      {status === 'never_run' ? 'NEVER RUN' : status.toUpperCase()}
-    </span>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm }}>
+        <div style={{
+          fontSize: typography.h3,
+          fontWeight: typography.semibold,
+          color: colors.text,
+          letterSpacing: '-0.01em',
+        }}>
+          {meta.label}
+        </div>
+        <StatusBadge status={job.last_status} />
+      </div>
+      <div style={{ color: colors.textFaint, fontSize: typography.small, marginBottom: spacing.md, lineHeight: 1.5 }}>
+        {meta.desc}
+      </div>
+      <div style={{ display: 'flex', gap: spacing.md, fontSize: typography.tiny, color: colors.textFaint, marginBottom: spacing.sm }}>
+        <span>Interval: <span style={{ color: colors.text, fontWeight: typography.medium }}>{meta.interval}</span></span>
+        <span>Runs: <span style={{ color: colors.text, fontWeight: typography.medium }}>{job.total_runs}</span></span>
+        {job.errors > 0 && (
+          <span style={{ color: colors.danger }}>Errors: {job.errors}</span>
+        )}
+      </div>
+      {job.last_run && (
+        <div style={{ fontSize: typography.tiny, color: colors.textMuted, marginBottom: spacing.sm }}>
+          Last: {formatDate(job.last_run)}
+          {job.last_duration_seconds != null && ` (${job.last_duration_seconds}s)`}
+        </div>
+      )}
+      {job.last_details && (
+        <div style={{
+          fontSize: typography.tiny,
+          color: colors.textDim,
+          background: colors.bg,
+          padding: '8px 10px',
+          borderRadius: radius.sm,
+          lineHeight: 1.5,
+          fontFamily: typography.mono,
+        }}>
+          {job.last_details}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -81,138 +107,98 @@ function ScanActivity() {
 
   return (
     <div>
-      <h2 style={{ fontSize: '18px', marginBottom: '20px' }}>Scanner Activity Log</h2>
-
-      {/* Job status cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '12px', marginBottom: '24px' }}>
-        {(summary || []).map((job) => {
-          const meta = JOB_LABELS[job.job_name] || { label: job.job_name, icon: '?', desc: '' };
-          return (
-            <div
-              key={job.job_name}
-              onClick={() => setSelectedJob(selectedJob === job.job_name ? null : job.job_name)}
-              style={{
-                ...cardStyle,
-                marginBottom: 0,
-                cursor: 'pointer',
-                borderColor: selectedJob === job.job_name ? '#44aaff' : '#222',
-                transition: 'border-color 0.2s',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <span style={{ fontWeight: 'bold', color: '#fff', fontSize: '14px' }}>
-                  {meta.label}
-                </span>
-                {statusBadge(job.last_status)}
-              </div>
-              <div style={{ color: '#555', fontSize: '11px', marginBottom: '8px' }}>{meta.desc}</div>
-              <div style={{ display: 'flex', gap: '16px', fontSize: '12px', color: '#888' }}>
-                <span>Interval: {meta.icon}</span>
-                <span>Runs: {job.total_runs}</span>
-                {job.errors > 0 && <span style={{ color: '#ff4444' }}>Errors: {job.errors}</span>}
-              </div>
-              {job.last_run && (
-                <div style={{ fontSize: '11px', color: '#555', marginTop: '6px' }}>
-                  Last: {formatDate(job.last_run)}
-                  {job.last_duration_seconds != null && ` (${job.last_duration_seconds}s)`}
-                </div>
-              )}
-              {job.last_details && (
-                <div style={{
-                  fontSize: '11px', color: '#aaa', marginTop: '6px',
-                  background: '#0a0a0f', padding: '6px 8px', borderRadius: '4px',
-                  lineHeight: '1.4',
-                }}>
-                  {job.last_details}
-                </div>
-              )}
-            </div>
-          );
-        })}
+      <h1 style={pageTitle}>Scanner Activity</h1>
+      <div style={pageSubtitle}>
+        Every scheduled job in the background pipeline and what it just ran.
       </div>
 
-      {/* Seed wallets button */}
-      <div style={cardStyle}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div>
-            <h3 style={{ fontSize: '14px', color: '#fff', marginBottom: '4px' }}>Seed Known Wallets</h3>
-            <div style={{ color: '#666', fontSize: '12px' }}>
-              Extracts deployers, top holders, and cluster patterns from RAVE, SIREN, RIVER, ARIA, STO.
-              Only needs to run once — then the wallet tracker monitors them automatically.
-            </div>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
+        gap: spacing.md,
+        marginBottom: spacing.xl,
+      }}>
+        {(summary || []).map((j) => (
+          <div key={j.job_name} onClick={() => setSelectedJob(selectedJob === j.job_name ? null : j.job_name)} style={{ cursor: 'pointer' }}>
+            <JobCard job={j} />
           </div>
-          <button
-            onClick={triggerSeed}
-            disabled={seeding}
-            style={{
-              background: seeding ? '#222' : '#1a1a2e',
-              border: '1px solid #44aaff',
-              color: seeding ? '#555' : '#44aaff',
-              padding: '10px 24px', borderRadius: '4px', cursor: seeding ? 'default' : 'pointer',
-              fontSize: '13px', whiteSpace: 'nowrap', fontWeight: 'bold',
-            }}
-          >
-            {seeding ? 'Running...' : 'Seed Wallets'}
-          </button>
-        </div>
-        {seedMsg && (
-          <div style={{ color: '#44ff44', fontSize: '12px', marginTop: '10px' }}>{seedMsg}</div>
-        )}
+        ))}
       </div>
 
-      {/* Detailed log entries */}
-      <div style={cardStyle}>
-        <h3 style={{ fontSize: '14px', marginBottom: '12px', color: '#888' }}>
-          {selectedJob ? `Logs: ${JOB_LABELS[selectedJob]?.label || selectedJob}` : 'All Recent Logs'}
+      <div style={{ ...card, marginBottom: spacing.xl, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontSize: typography.h3, fontWeight: typography.semibold, color: colors.text, marginBottom: 4 }}>
+            Seed Known Wallets
+          </div>
+          <div style={{ color: colors.textFaint, fontSize: typography.small }}>
+            Extracts operator wallets from confirmed BSC pumps (RAVE, SIREN, RIVER, ARIA, STO, DEXE).
+          </div>
+          {seedMsg && (
+            <div style={{ color: colors.success, fontSize: typography.small, marginTop: 8 }}>{seedMsg}</div>
+          )}
+        </div>
+        <button
+          onClick={triggerSeed}
+          disabled={seeding}
+          style={{ ...buttonPrimary, opacity: seeding ? 0.5 : 1 }}
+        >
+          {seeding ? 'Running…' : 'Run Seeder'}
+        </button>
+      </div>
+
+      <div style={{ ...card, padding: 0 }}>
+        <div style={{ padding: `${spacing.md} ${spacing.lg}`, borderBottom: `1px solid ${colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={sectionTitle}>
+            {selectedJob ? `Logs: ${JOB_LABELS[selectedJob]?.label || selectedJob}` : 'All Recent Logs'}
+          </div>
           {selectedJob && (
             <button
               onClick={() => setSelectedJob(null)}
               style={{
-                background: 'none', border: '1px solid #333', color: '#666',
-                padding: '2px 8px', borderRadius: '4px', cursor: 'pointer',
-                fontSize: '11px', marginLeft: '12px',
+                background: 'transparent',
+                border: `1px solid ${colors.borderStrong}`,
+                color: colors.textDim,
+                padding: '6px 12px',
+                borderRadius: radius.sm,
+                fontSize: typography.small,
+                cursor: 'pointer',
               }}
             >
-              Show All
+              Show all
             </button>
           )}
-        </h3>
-        <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
+        </div>
+        <div style={{ maxHeight: 600, overflowY: 'auto' }}>
           {(logs?.items || []).length === 0 ? (
-            <div style={{ color: '#444', fontSize: '13px', padding: '20px', textAlign: 'center' }}>
-              No scan logs yet. The scanner runs on a schedule — first logs will appear within 15 minutes of deployment.
+            <div style={{ padding: '48px 16px', textAlign: 'center', color: colors.textFaint }}>
+              No logs yet.
             </div>
           ) : (
             (logs?.items || []).map((entry) => (
               <div key={entry.id} style={{
-                padding: '12px',
-                borderBottom: '1px solid #1a1a1a',
-                fontSize: '12px',
+                padding: `${spacing.md} ${spacing.lg}`,
+                borderBottom: `1px solid ${colors.border}`,
+                fontSize: typography.small,
               }}>
-                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '4px' }}>
-                  <span style={{
-                    padding: '2px 6px', borderRadius: '3px', fontSize: '10px',
-                    background: '#1a1a2e', color: '#44aaff',
-                  }}>
+                <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center', marginBottom: 4, flexWrap: 'wrap' }}>
+                  <span style={pill('accent')}>
                     {JOB_LABELS[entry.job_name]?.label || entry.job_name}
                   </span>
-                  {statusBadge(entry.status)}
-                  <span style={{ color: '#555' }}>{formatDate(entry.started_at)}</span>
+                  <StatusBadge status={entry.status} />
+                  <span style={{ color: colors.textFaint }}>{formatDate(entry.started_at)}</span>
                   {entry.duration_seconds != null && (
-                    <span style={{ color: '#444' }}>{entry.duration_seconds}s</span>
-                  )}
-                  {entry.tokens_checked > 0 && (
-                    <span style={{ color: '#888' }}>Checked: {entry.tokens_checked}</span>
-                  )}
-                  {entry.tokens_flagged > 0 && (
-                    <span style={{ color: '#ffaa00' }}>Flagged: {entry.tokens_flagged}</span>
+                    <span style={{ color: colors.textMuted }}>{entry.duration_seconds}s</span>
                   )}
                 </div>
                 {entry.details && (
-                  <div style={{ color: '#aaa', lineHeight: '1.4' }}>{entry.details}</div>
+                  <div style={{ color: colors.textDim, lineHeight: 1.5, fontFamily: typography.mono, fontSize: typography.tiny }}>
+                    {entry.details}
+                  </div>
                 )}
                 {entry.error_message && (
-                  <div style={{ color: '#ff4444', marginTop: '4px' }}>{entry.error_message}</div>
+                  <div style={{ color: colors.danger, marginTop: 4, fontFamily: typography.mono, fontSize: typography.tiny }}>
+                    {entry.error_message}
+                  </div>
                 )}
               </div>
             ))

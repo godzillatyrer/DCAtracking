@@ -327,26 +327,14 @@ function SeedActions() {
   const actions = [
     {
       key: 'known_wallets',
-      title: 'Seed Known Wallets',
-      desc: 'Extracts top holders / clusters from RAVE, SIREN, RIVER, ARIA, STO. Idempotent.',
+      title: 'Seed Known Wallets (BSC)',
+      desc: 'Extracts top holders + clusters from confirmed BSC pumps (RAVE, SIREN, RIVER, ARIA, STO, DEXE). Idempotent, 24h cooldown.',
       url: '/api/dashboard/seed-wallets',
-    },
-    {
-      key: 'bridges',
-      title: 'Seed BSC Bridges',
-      desc: 'Seeds Wormhole, Stargate, cBridge, Synapse, etc. for Module 14 (exploit detection).',
-      url: '/api/dashboard/seed-bridges',
-    },
-    {
-      key: 'golden_deployers',
-      title: 'Seed Golden Deployers',
-      desc: 'Resolves deployer addresses for historical $50M+ BSC launches and tags them as golden_deployer in known_wallets. Takes 5-15 min.',
-      url: '/api/dashboard/seed-golden-deployers',
     },
     {
       key: 'solana_wallets',
       title: 'Seed Solana Infrastructure',
-      desc: 'Bootstraps solana_known_wallets with Raydium/Pump.fun/Jupiter so Solana detection has a baseline.',
+      desc: 'Bootstraps solana_known_wallets with Raydium / Pump.fun / Jupiter programs.',
       url: '/api/dashboard/seed-solana-wallets',
     },
   ];
