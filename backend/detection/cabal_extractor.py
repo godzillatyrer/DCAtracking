@@ -2,25 +2,25 @@
 Cabal Wallet Extractor — multi-source.
 
 Given a Solana runner CA, pull early buyers + sellers + top holders
-from every data source we have access to, merge + dedup by wallet,
-then insert into solana_known_wallets.
+from every data source we have, merge + dedup by wallet, then insert
+into solana_known_wallets.
 
-Sources (merged in priority order, richest-data-wins on dup):
+Sources (merged, richest-data-wins on dup):
   1. GMGN /tokens/top_holders/sol/{mint}   — current top holders w/ balance
   2. GMGN /tokens/top_traders/sol/{mint}   — top traders ranked by PnL
-  3. Helius getTokenLargestAccounts + account-info resolution — on-chain
-     truth for top 20 current holders (regardless of GMGN)
-  4. Helius transaction-history parse — captures sellers who already
-     exited (zero balance but realized PnL)
+  3. Helius getTokenLargestAccounts + account-info resolution
+  4. Helius transaction-history parse — captures sellers who exited
 
-Filtering is deliberately PERMISSIVE by default:
-  - min_profit_usd=500 (was 5000) — avoids missing small-but-real winners
-  - min_profit_mult=0 — many wallets lack reliable PnL; we keep them
-                       anyway if they appear in a credible source
+Filter (for the user's goal: early buyers still holding or exited at
+profit), we keep any wallet that:
+  - has tokens_bought > 0, OR
+  - appears in >= 2 sources (cross-confirmation), OR
+  - has realized_profit_usd >= min_profit_usd, OR
+  - has balance_usd >= min_profit_usd
 
-User can tighten via request params. Over time, wallets that keep
-appearing across multiple runners are the real cabal — those are
-the strongest signal.
+Wallets are sorted by max(balance_usd, realized_profit_usd), cross-
+confirmed first. Rank is what matters — strict filters mean zero hits
+for brand-new tokens with thin external data.
 """
 
 import asyncio
@@ -29,9 +29,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+import httpx
 from sqlalchemy.orm import Session
 
-from backend.clients import defillama, geckoterminal, gmgn, helius
+from backend.clients import birdeye, defillama, geckoterminal, gmgn, helius
+from backend.config import settings
 from backend.database import SessionLocal
 from backend.models.solana_known_wallet import SolanaKnownWallet
 
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MIN_PROFIT_USD = 500.0
 DEFAULT_MIN_PROFIT_MULT = 0.0
 DEFAULT_MAX_WALLETS = 60
-DEFAULT_MAX_SIGNATURES = 600
+DEFAULT_MAX_SIGNATURES = 1500  # covers early buyers on most pump.fun runners
 LAMPORTS_PER_SOL = 1_000_000_000
 
 SKIP_ADDRESSES = {
@@ -144,9 +146,11 @@ def _extract_gmgn_wallet(raw: dict) -> tuple[str | None, dict]:
 async def _collect_from_gmgn(mint: str, pool: dict, debug: dict):
     """Pull from both GMGN top_traders AND top_holders."""
     try:
-        traders = await gmgn.token_top_traders(mint, limit=100) or []
+        traders = await gmgn.token_top_traders(mint, limit=100)
         items = _unwrap(traders)
         debug["gmgn_top_traders_count"] = len(items)
+        if not items and traders is not None:
+            debug["gmgn_top_traders_raw"] = str(traders)[:200]
         for raw in items:
             if not isinstance(raw, dict):
                 continue
@@ -157,9 +161,11 @@ async def _collect_from_gmgn(mint: str, pool: dict, debug: dict):
         debug["gmgn_top_traders_error"] = str(e)[:200]
 
     try:
-        holders = await gmgn.token_holders(mint, limit=100) or []
+        holders = await gmgn.token_holders(mint, limit=100)
         items = _unwrap(holders)
         debug["gmgn_top_holders_count"] = len(items)
+        if not items and holders is not None:
+            debug["gmgn_top_holders_raw"] = str(holders)[:200]
         for raw in items:
             if not isinstance(raw, dict):
                 continue
@@ -168,6 +174,52 @@ async def _collect_from_gmgn(mint: str, pool: dict, debug: dict):
                 _merge_into(pool, addr, w, "gmgn_holder")
     except Exception as e:
         debug["gmgn_top_holders_error"] = str(e)[:200]
+
+
+async def _resolve_token_price_usd(mint: str) -> tuple[float, str]:
+    """Price fallback chain: GeckoTerminal → DexScreener → Birdeye.
+    Returns (price_usd, source). 0.0 if nothing succeeded."""
+    try:
+        info = await geckoterminal.token_info("solana", mint)
+        if info:
+            price = float((info.get("attributes") or {}).get("price_usd") or 0)
+            if price > 0:
+                return price, "geckoterminal"
+    except Exception:
+        pass
+
+    try:
+        url = f"{settings.DEXSCREENER_BASE_URL}/latest/dex/tokens/{mint}"
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                pairs = (resp.json() or {}).get("pairs") or []
+                # Take max liquidity pair's price
+                best = None
+                best_liq = 0
+                for p in pairs:
+                    liq = float(((p.get("liquidity") or {}).get("usd")) or 0)
+                    if liq >= best_liq:
+                        best_liq = liq
+                        best = p
+                if best:
+                    price = float(best.get("priceUsd") or 0)
+                    if price > 0:
+                        return price, "dexscreener"
+    except Exception:
+        pass
+
+    if birdeye.configured:
+        try:
+            overview = await birdeye.token_overview(mint)
+            if overview:
+                price = float(overview.get("price") or 0)
+                if price > 0:
+                    return price, "birdeye"
+        except Exception:
+            pass
+
+    return 0.0, "none"
 
 
 def _unwrap(data: Any) -> list[dict]:
@@ -187,17 +239,13 @@ def _unwrap(data: Any) -> list[dict]:
 
 # ─── Source 3: Helius getTokenLargestAccounts ──────────────────────────
 
-async def _collect_helius_top_holders(mint: str, pool: dict, debug: dict):
+async def _collect_helius_top_holders(
+    mint: str, pool: dict, debug: dict, price_usd: float,
+):
     if not helius.configured:
         debug["helius_top_holders"] = "HELIUS_API_KEY not set"
         return
     try:
-        price_usd = 0.0
-        info = await geckoterminal.token_info("solana", mint)
-        if info:
-            attrs = info.get("attributes") or {}
-            price_usd = float(attrs.get("price_usd") or 0)
-
         result = await helius._rpc("getTokenLargestAccounts", [mint])
         if not result or not isinstance(result, dict):
             debug["helius_top_holders"] = f"bad response: {type(result)}"
@@ -263,11 +311,25 @@ async def _paginate_signatures(mint: str, max_sigs: int) -> list[dict]:
 
 
 def _parse_tx_for_swaps(tx: dict, target_mint: str) -> list[dict]:
+    """Extract (wallet, direction, token_amount, sol_amount) per wallet
+    whose balance of `target_mint` changed. SOL amount is attributed
+    using each wallet's own index in accountKeys — so bot-routed swaps
+    where fee_payer differs from the trader still get correct credit
+    whenever the trader signs the tx (very common on pump.fun).
+    """
     events = []
     try:
         message = (tx.get("transaction") or {}).get("message") or {}
         meta = tx.get("meta") or {}
         account_keys = message.get("accountKeys") or []
+
+        # pubkey -> index in accountKeys (for SOL delta lookup)
+        key_index: dict[str, int] = {}
+        for i, k in enumerate(account_keys):
+            pubkey = k.get("pubkey") if isinstance(k, dict) else str(k)
+            if pubkey:
+                key_index[pubkey] = i
+
         fee_payer = None
         if account_keys:
             first = account_keys[0]
@@ -275,63 +337,66 @@ def _parse_tx_for_swaps(tx: dict, target_mint: str) -> list[dict]:
 
         pre = meta.get("preTokenBalances") or []
         post = meta.get("postTokenBalances") or []
-        pre_by_key = {}
+        pre_by_owner: dict[str, float] = {}
         for b in pre:
             if b.get("mint") != target_mint:
                 continue
             o = b.get("owner")
             if o:
-                pre_by_key[o] = float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0)
-        post_by_key = {}
+                pre_by_owner[o] = float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0)
+        post_by_owner: dict[str, float] = {}
         for b in post:
             if b.get("mint") != target_mint:
                 continue
             o = b.get("owner")
             if o:
-                post_by_key[o] = float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0)
+                post_by_owner[o] = float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0)
 
-        all_owners = set(pre_by_key) | set(post_by_key)
+        all_owners = set(pre_by_owner) | set(post_by_owner)
         pre_sol = meta.get("preBalances") or []
         post_sol = meta.get("postBalances") or []
-        sol_delta_lamports = 0
-        if pre_sol and post_sol and len(pre_sol) > 0 and len(post_sol) > 0:
-            sol_delta_lamports = post_sol[0] - pre_sol[0]
-        sol_amount = abs(sol_delta_lamports) / LAMPORTS_PER_SOL
 
         for owner in all_owners:
             if owner in SKIP_ADDRESSES:
                 continue
-            pre_amt = pre_by_key.get(owner, 0)
-            post_amt = post_by_key.get(owner, 0)
-            delta = post_amt - pre_amt
-            if abs(delta) < 1e-9:
+            pre_amt = pre_by_owner.get(owner, 0)
+            post_amt = post_by_owner.get(owner, 0)
+            token_delta = post_amt - pre_amt
+            if abs(token_delta) < 1e-9:
                 continue
-            direction = "buy" if delta > 0 else "sell"
+
+            # Per-owner SOL delta from accountKeys index
+            sol_amount = 0.0
+            idx = key_index.get(owner)
+            if idx is not None and idx < len(pre_sol) and idx < len(post_sol):
+                sol_amount = abs(post_sol[idx] - pre_sol[idx]) / LAMPORTS_PER_SOL
+            elif owner == fee_payer and pre_sol and post_sol:
+                # Fallback: fee_payer is always index 0
+                sol_amount = abs(post_sol[0] - pre_sol[0]) / LAMPORTS_PER_SOL
+
+            direction = "buy" if token_delta > 0 else "sell"
             events.append({
                 "wallet": owner,
                 "direction": direction,
-                "token_amount": abs(delta),
-                "sol_amount": sol_amount if owner == fee_payer else 0.0,
+                "token_amount": abs(token_delta),
+                "sol_amount": sol_amount,
             })
     except Exception:
         pass
     return events
 
 
-async def _collect_helius_tx_history(mint: str, pool: dict, debug: dict):
+async def _collect_helius_tx_history(
+    mint: str, pool: dict, debug: dict, price_usd: float, max_signatures: int,
+):
     if not helius.configured:
         debug["helius_tx_history"] = "HELIUS_API_KEY not set"
         return
     try:
-        price_usd = 0.0
-        info = await geckoterminal.token_info("solana", mint)
-        if info:
-            attrs = info.get("attributes") or {}
-            price_usd = float(attrs.get("price_usd") or 0)
         prices = await defillama.current_prices(["coingecko:solana"])
         sol_price_usd = float((prices.get("coingecko:solana") or {}).get("price") or 0)
 
-        sigs = await _paginate_signatures(mint, DEFAULT_MAX_SIGNATURES)
+        sigs = await _paginate_signatures(mint, max_signatures)
         debug["helius_tx_signatures"] = len(sigs)
         if not sigs:
             return
@@ -361,20 +426,25 @@ async def _collect_helius_tx_history(mint: str, pool: dict, debug: dict):
         debug["helius_tx_wallets_found"] = len(wallet_stats)
 
         for addr, s in wallet_stats.items():
-            current_balance = s["tokens_bought"] - s["tokens_sold"]
-            current_value_usd = max(0, current_balance) * price_usd
+            current_balance = max(0.0, s["tokens_bought"] - s["tokens_sold"])
+            current_value_usd = current_balance * price_usd
             cost_usd = s["sol_spent"] * sol_price_usd
             received_usd = s["sol_received"] * sol_price_usd
-            realized = 0.0
-            if s["tokens_sold"] > 0 and s["tokens_bought"] > 0:
-                avg_cost_per_token = cost_usd / s["tokens_bought"] if s["tokens_bought"] else 0
-                realized = received_usd - (avg_cost_per_token * s["tokens_sold"])
+
+            # Cost basis is per-token, so realized/unrealized split it
+            # proportionally — no double counting of cost_usd.
+            if s["tokens_bought"] > 0:
+                avg_cost_per_token = cost_usd / s["tokens_bought"]
+                cost_of_sold = avg_cost_per_token * s["tokens_sold"]
+                cost_of_held = avg_cost_per_token * current_balance
             else:
-                realized = received_usd - cost_usd
-            unrealized = current_value_usd - (
-                cost_usd * (max(0, current_balance) / s["tokens_bought"])
-                if s["tokens_bought"] else 0
-            )
+                # Tokens appeared from airdrop / transfer; no basis to apply
+                avg_cost_per_token = 0.0
+                cost_of_sold = 0.0
+                cost_of_held = 0.0
+
+            realized = received_usd - cost_of_sold
+            unrealized = current_value_usd - cost_of_held
             total_profit = realized + unrealized
             profit_mult = (total_profit / cost_usd) if cost_usd > 0 else 0.0
 
@@ -405,36 +475,52 @@ async def extract_cabal_wallets(
     min_profit_usd: float = DEFAULT_MIN_PROFIT_USD,
     min_profit_mult: float = DEFAULT_MIN_PROFIT_MULT,
     max_wallets: int = DEFAULT_MAX_WALLETS,
+    max_signatures: int = DEFAULT_MAX_SIGNATURES,
 ) -> tuple[list[dict], dict]:
     """Multi-source extraction. Merges GMGN + Helius top-holders + Helius tx history."""
     debug: dict = {"mint": mint}
     pool: dict[str, dict] = {}
 
-    # Run all four collectors in sequence (they share rate-limit budgets)
+    # Price resolution: GeckoTerminal → DexScreener → Birdeye. Zero if
+    # all three fail (common on brand-new pump.fun tokens).
+    price_usd, price_source = await _resolve_token_price_usd(mint)
+    debug["token_price_usd"] = price_usd
+    debug["token_price_source"] = price_source
+
     await _collect_from_gmgn(mint, pool, debug)
-    await _collect_helius_top_holders(mint, pool, debug)
-    await _collect_helius_tx_history(mint, pool, debug)
+    await _collect_helius_top_holders(mint, pool, debug, price_usd)
+    await _collect_helius_tx_history(mint, pool, debug, price_usd, max_signatures)
 
     debug["total_unique_wallets"] = len(pool)
 
-    # Filter: keep if ANY of the following:
-    #   - total_profit_usd >= min_profit_usd
-    #   - balance_usd >= min_profit_usd (we value their current position)
-    #   - appears in multiple sources (cross-confirmation)
+    # Filter for user's goal: "early buyers who bought and are either
+    # still holding or exited profitably". Keep any wallet that either:
+    #   - actually bought the token (tokens_bought > 0), OR
+    #   - appears in >= 2 sources (cross-confirmed), OR
+    #   - has realized profit or current balance above the threshold
+    # Threshold gates are OR'd so a single good signal is enough — we
+    # rank the winners below, we don't rely on strict filters.
     filtered = []
     for w in pool.values():
+        bought = (w.get("tokens_bought") or 0) > 0
         cross_confirmed = len(w["sources"]) >= 2
-        profit_ok = w["total_profit_usd"] >= min_profit_usd
+        profit_ok = w["realized_profit_usd"] >= min_profit_usd
         balance_ok = w["balance_usd"] >= min_profit_usd
-        mult_ok = w["profit_multiplier"] >= min_profit_mult or min_profit_mult == 0
-        if (profit_ok or balance_ok or cross_confirmed) and mult_ok:
+        mult_ok = min_profit_mult == 0 or w["profit_multiplier"] >= min_profit_mult
+        if (bought or cross_confirmed or profit_ok or balance_ok) and mult_ok:
             filtered.append(w)
 
-    # Sort: cross-confirmed first, then by total_profit, then by balance
+    # Rank: cross-confirmed wallets first, then by the larger of realized
+    # profit or current holding value. Gives priority to confirmed cabal
+    # signal over raw PnL noise.
     def sort_key(w):
         return (
             -len(w["sources"]),
-            -max(w["total_profit_usd"], w["balance_usd"]),
+            -max(
+                w["realized_profit_usd"],
+                w["balance_usd"],
+                w["total_profit_usd"],
+            ),
         )
     filtered.sort(key=sort_key)
 

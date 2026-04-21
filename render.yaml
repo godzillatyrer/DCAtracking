@@ -1,5 +1,5 @@
-# Single-service deployment: API + dashboard + background scanner in one process.
-# Only needs 1 web service + 1 database on Render.
+# Single-service deployment: API + React dashboard + graph-walk scheduler
+# in one process.
 
 databases:
   - name: pump-scanner-db
@@ -8,7 +8,6 @@ databases:
     user: scanner
 
 services:
-  # Single web service — serves API, React dashboard, and runs scanner jobs in-process
   - type: web
     name: pump-scanner-web
     runtime: python
@@ -22,14 +21,14 @@ services:
         fromDatabase:
           name: pump-scanner-db
           property: connectionString
-      - key: BSCSCAN_API_KEY
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: ARKHAM_API_KEY
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: GMGN_API_KEY
+        sync: false
+      - key: BIRDEYE_API_KEY
         sync: false
     healthCheckPath: /api/health
