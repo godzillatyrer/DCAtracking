@@ -5,69 +5,81 @@ import TokenDetail from './components/TokenDetail';
 import WalletTracker from './components/WalletTracker';
 import AlertLog from './components/AlertLog';
 import ScanActivity from './components/ScanActivity';
-import Launches from './components/Launches';
-import Exploits from './components/Exploits';
 import APIStatus from './components/APIStatus';
 
-const navStyle = {
+const LOGO = 'PUMP SCANNER';
+
+const navOuter = {
+  borderBottom: '1px solid #1d1f27',
+  background: 'linear-gradient(180deg, #0e1014 0%, #0b0d12 100%)',
+  backdropFilter: 'blur(8px)',
+};
+
+const navInner = {
   display: 'flex',
-  gap: '20px',
-  padding: '16px 24px',
-  background: '#111118',
-  borderBottom: '1px solid #222',
+  gap: '32px',
+  padding: '18px 32px',
   alignItems: 'center',
+  maxWidth: '1400px',
+  margin: '0 auto',
 };
 
 const linkStyle = {
-  color: '#888',
+  color: '#7a7f8c',
   textDecoration: 'none',
   fontSize: '14px',
-  padding: '6px 12px',
-  borderRadius: '4px',
-  transition: 'all 0.2s',
+  fontWeight: 500,
+  padding: '8px 0',
+  borderBottom: '2px solid transparent',
+  transition: 'color 0.15s, border-color 0.15s',
 };
 
 const activeLinkStyle = {
   ...linkStyle,
-  color: '#fff',
-  background: '#1a1a2e',
+  color: '#f5f7fa',
+  borderBottomColor: '#3b82f6',
 };
 
 function App() {
   return (
     <BrowserRouter>
-      <div style={{ minHeight: '100vh', background: '#0a0a0f', color: '#e0e0e0' }}>
-        <nav style={navStyle}>
-          <span style={{ color: '#ff4444', fontWeight: 'bold', fontSize: '16px', marginRight: '20px' }}>
-            BSC PUMP SCANNER
-          </span>
-          <NavLink to="/" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle} end>
-            Dashboard
-          </NavLink>
-          <NavLink to="/launches" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-            Launches
-          </NavLink>
-          <NavLink to="/exploits" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-            Exploits
-          </NavLink>
-          <NavLink to="/wallets" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-            Wallet Tracker
-          </NavLink>
-          <NavLink to="/alerts" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-            Alert Log
-          </NavLink>
-          <NavLink to="/activity" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-            Scanner Activity
-          </NavLink>
-          <NavLink to="/api-status" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-            API Status
-          </NavLink>
+      <div style={{
+        minHeight: '100vh',
+        background: '#0b0d12',
+        color: '#e6e8ec',
+        fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+      }}>
+        <nav style={navOuter}>
+          <div style={navInner}>
+            <span style={{
+              color: '#f5f7fa',
+              fontWeight: 700,
+              fontSize: '15px',
+              letterSpacing: '2px',
+              marginRight: '24px',
+            }}>
+              <span style={{ color: '#3b82f6' }}>◆</span> {LOGO}
+            </span>
+            <NavLink to="/" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle} end>
+              Dashboard
+            </NavLink>
+            <NavLink to="/wallets" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+              Wallet Tracker
+            </NavLink>
+            <NavLink to="/alerts" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+              Alerts
+            </NavLink>
+            <NavLink to="/activity" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+              Activity
+            </NavLink>
+            <NavLink to="/api-status" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+              API Status
+            </NavLink>
+          </div>
         </nav>
-        <div style={{ padding: '24px' }}>
+        <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '32px' }}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
-            <Route path="/launches" element={<Launches />} />
-            <Route path="/exploits" element={<Exploits />} />
             <Route path="/token/:address" element={<TokenDetail />} />
             <Route path="/wallets" element={<WalletTracker />} />
             <Route path="/alerts" element={<AlertLog />} />

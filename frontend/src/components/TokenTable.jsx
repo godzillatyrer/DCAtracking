@@ -1,35 +1,22 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { formatUSD, formatPct, scoreColor } from '../utils/formatters';
-import ScoreGauge from './ScoreGauge';
+import { formatUSD } from '../utils/formatters';
+import { colors, typography, th, td, pill } from '../theme';
 
-const tableStyle = {
-  width: '100%',
-  borderCollapse: 'collapse',
-  fontSize: '13px',
-};
-
-const thStyle = {
-  textAlign: 'left',
-  padding: '10px 12px',
-  color: '#666',
-  fontSize: '11px',
-  textTransform: 'uppercase',
-  letterSpacing: '0.5px',
-  borderBottom: '1px solid #222',
-  whiteSpace: 'nowrap',
-};
-
-const tdStyle = {
-  padding: '10px 12px',
-  borderBottom: '1px solid #1a1a1a',
-  whiteSpace: 'nowrap',
-};
-
-function getRowBg(score) {
-  if (score >= 70) return 'rgba(255, 68, 68, 0.08)';
-  if (score >= 50) return 'rgba(255, 170, 0, 0.06)';
-  return 'transparent';
+function ScoreBadge({ score }) {
+  let variant = 'default';
+  if (score >= 70) variant = 'danger';
+  else if (score >= 50) variant = 'warning';
+  return (
+    <span style={{
+      ...pill(variant),
+      fontFamily: typography.mono,
+      fontSize: typography.small,
+      padding: '6px 12px',
+    }}>
+      {score}
+    </span>
+  );
 }
 
 function TokenTable({ tokens }) {
@@ -37,27 +24,32 @@ function TokenTable({ tokens }) {
 
   if (!tokens || tokens.length === 0) {
     return (
-      <div style={{ padding: '40px', textAlign: 'center', color: '#444' }}>
-        No tokens on watchlist yet. Scanner will populate this automatically.
+      <div style={{
+        padding: '80px 40px',
+        textAlign: 'center',
+        color: colors.textFaint,
+        fontSize: typography.body,
+      }}>
+        No tokens on watchlist yet. The scanner populates this automatically as
+        pump patterns emerge.
       </div>
     );
   }
 
   return (
     <div style={{ overflowX: 'auto' }}>
-      <table style={tableStyle}>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr>
-            <th style={thStyle}>Score</th>
-            <th style={thStyle}>Token</th>
-            <th style={thStyle}>Price</th>
-            <th style={thStyle}>24h Volume</th>
-            <th style={thStyle}>MCap</th>
-            <th style={thStyle}>Confidence</th>
-            <th style={thStyle}>Cluster</th>
-            <th style={thStyle}>Exchange Flow</th>
-            <th style={thStyle}>Social</th>
-            <th style={thStyle}>Alert</th>
+            <th style={th}>Score</th>
+            <th style={th}>Token</th>
+            <th style={th}>Price</th>
+            <th style={th}>24h Volume</th>
+            <th style={th}>Market Cap</th>
+            <th style={th}>Confidence</th>
+            <th style={th}>Cluster</th>
+            <th style={th}>Exchange Flow</th>
+            <th style={th}>Alert</th>
           </tr>
         </thead>
         <tbody>
@@ -67,60 +59,66 @@ function TokenTable({ tokens }) {
               onClick={() => navigate(`/token/${t.contract_address}`)}
               style={{
                 cursor: 'pointer',
-                background: getRowBg(t.current_score),
-                transition: 'background 0.2s',
+                transition: 'background 0.15s',
               }}
-              onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.03)'}
-              onMouseLeave={(e) => e.currentTarget.style.background = getRowBg(t.current_score)}
+              onMouseEnter={(e) => e.currentTarget.style.background = colors.bgHover}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
             >
-              <td style={tdStyle}>
-                <ScoreGauge score={t.current_score || 0} size={40} />
+              <td style={td}>
+                <ScoreBadge score={t.current_score || 0} />
               </td>
-              <td style={tdStyle}>
-                <div style={{ fontWeight: 'bold', color: '#fff' }}>{t.token_symbol || '?'}</div>
-                <div style={{ fontSize: '11px', color: '#555' }}>{t.token_name}</div>
+              <td style={td}>
+                <div style={{ fontWeight: typography.semibold, color: colors.text, fontSize: typography.body }}>
+                  {t.token_symbol || '—'}
+                </div>
+                {t.token_name && (
+                  <div style={{ fontSize: typography.small, color: colors.textFaint, marginTop: 2 }}>
+                    {t.token_name}
+                  </div>
+                )}
               </td>
-              <td style={tdStyle}>{formatUSD(t.price_usd)}</td>
-              <td style={tdStyle}>{formatUSD(t.volume_24h)}</td>
-              <td style={tdStyle}>{formatUSD(t.market_cap)}</td>
-              <td style={tdStyle}>
-                <span style={{
-                  color: t.confidence_level === 'HIGH' ? '#ff4444' :
-                         t.confidence_level === 'MEDIUM' ? '#ffaa00' : '#666',
-                  fontWeight: 'bold',
-                  fontSize: '11px',
-                }}>
-                  {t.confidence_level || '-'}
-                </span>
+              <td style={{ ...td, fontFamily: typography.mono, color: colors.textDim }}>
+                {formatUSD(t.price_usd)}
               </td>
-              <td style={tdStyle}>
+              <td style={{ ...td, fontFamily: typography.mono, color: colors.textDim }}>
+                {formatUSD(t.volume_24h)}
+              </td>
+              <td style={{ ...td, fontFamily: typography.mono, color: colors.textDim }}>
+                {formatUSD(t.market_cap)}
+              </td>
+              <td style={td}>
+                {t.confidence_level && (
+                  <span style={pill(
+                    t.confidence_level === 'HIGH' ? 'danger' :
+                    t.confidence_level === 'MEDIUM' ? 'warning' : 'default'
+                  )}>
+                    {t.confidence_level}
+                  </span>
+                )}
+              </td>
+              <td style={td}>
                 {t.cluster_detected === true ? (
-                  <span style={{ color: '#ff4444' }}>YES ({t.cluster_wallet_count})</span>
+                  <span style={pill('danger')}>YES · {t.cluster_wallet_count}</span>
                 ) : t.cluster_detected === false ? (
-                  <span style={{ color: '#444' }}>No</span>
+                  <span style={{ color: colors.textMuted, fontSize: typography.small }}>No</span>
                 ) : (
-                  <span style={{ color: '#555', fontStyle: 'italic' }} title="Wallet analyzer hasn't scored this token yet">pending</span>
+                  <span style={{ color: colors.textMuted, fontSize: typography.small, fontStyle: 'italic' }}>
+                    pending
+                  </span>
                 )}
               </td>
-              <td style={tdStyle}>
+              <td style={td}>
                 {t.exchange_deposits_detected ? (
-                  <span style={{ color: '#ff4444' }}>DETECTED</span>
+                  <span style={pill('danger')}>DETECTED</span>
                 ) : (
-                  <span style={{ color: '#444' }}>No</span>
+                  <span style={{ color: colors.textMuted, fontSize: typography.small }}>—</span>
                 )}
               </td>
-              <td style={tdStyle}>
-                {t.social_signal_detected ? (
-                  <span style={{ color: '#ffaa00' }}>Active</span>
-                ) : (
-                  <span style={{ color: '#444' }}>-</span>
-                )}
-              </td>
-              <td style={tdStyle}>
+              <td style={td}>
                 {t.alert_fired ? (
-                  <span style={{ color: '#ff4444', fontWeight: 'bold' }}>FIRED</span>
+                  <span style={pill('danger')}>FIRED</span>
                 ) : (
-                  <span style={{ color: '#444' }}>-</span>
+                  <span style={{ color: colors.textMuted, fontSize: typography.small }}>—</span>
                 )}
               </td>
             </tr>

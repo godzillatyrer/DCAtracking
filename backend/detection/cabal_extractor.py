@@ -1,32 +1,33 @@
 """
-Cabal Wallet Extractor — paste a runner CA, get early profitable wallets.
+Cabal Wallet Extractor — paste a runner CA, extract early buyers AND
+sellers from on-chain transaction history.
 
-Given a Solana token mint address of a recent "runner" (memecoin that
-pumped hard), this module:
-  1. Pulls top traders + top holders from GMGN
-  2. Filters for wallets with early entry + high profit
-  3. Optionally auto-adds them to `solana_known_wallets` as role='cabal_trader'
-  4. Returns the ranked list so the user can review
+Uses Helius RPC to parse the transaction history of a Solana token
+mint directly:
+  1. Pull up to 1000 signatures on the mint (paginated)
+  2. Parse each tx to detect SPL token transfers involving the mint
+  3. Per wallet, track: tokens bought, SOL spent (approx), tokens sold,
+     SOL received, current balance
+  4. Compute realized + unrealized PnL
+  5. Filter by profit threshold, rank, return
 
-These wallets then feed into:
-  - Module 5 (insider_early_buyer) — alerts when ≥3 show up in a new launch
-  - Module 3 (whale_fresh_wallet) — alerts when they fund fresh wallets
-  - solana_graph_walk — follows their money to discover rotated wallets
+Captures BOTH still-holding bagholders AND cashed-out cabal members
+who rotated profits to fresh wallets. The smartest cabal operators
+typically sell near the top — those are the ones we most want to track.
 
-Usage:
-  POST /api/wallets/solana/extract-from-runner
-  Body: {"mint": "Hon2rHAiqkcDtUzL5gA2vjXPr7T1MPCK2UT2AHKCpump"}
+Helius budget per extraction: ~500-1000 calls. At paid tier (50 req/s)
+that's ~10-20 seconds per extraction. Acceptable for a manual-trigger
+feature that the user calls once per runner.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
 
 from sqlalchemy.orm import Session
 
-from backend.clients import gmgn
-from backend.config import settings
+from backend.clients import helius, geckoterminal, gmgn
 from backend.database import SessionLocal
 from backend.models.solana_known_wallet import SolanaKnownWallet
 
@@ -34,230 +35,153 @@ logger = logging.getLogger(__name__)
 
 # Default extraction filters
 DEFAULT_MIN_PROFIT_USD = 5_000.0
-DEFAULT_MIN_PROFIT_MULT = 3.0    # 3x minimum
+DEFAULT_MIN_PROFIT_MULT = 3.0
 DEFAULT_MAX_WALLETS = 30
+DEFAULT_MAX_SIGNATURES = 1000  # paginate up to this many tx sigs
+LAMPORTS_PER_SOL = 1_000_000_000
+
+# Infrastructure addresses to skip (these are programs/pools, not traders)
+SKIP_ADDRESSES = {
+    "11111111111111111111111111111111",
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",    # Raydium AMM v4
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",     # Pump.fun
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",    # Raydium CLMM
+    "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",    # Orca Whirlpools
+    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",     # Jupiter v6
+    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",    # Raydium auth
+    "So11111111111111111111111111111111111111112",     # Wrapped SOL
+}
 
 
-async def _helius_top_holders(mint: str, limit: int = 20) -> tuple[list[dict], dict]:
-    """
-    Fallback when GMGN returns empty (Cloudflare blocks).
-
-    Uses Solana RPC's getTokenLargestAccounts (top 20 by balance) +
-    getAccountInfo per account to resolve owner wallets. This gives us
-    CURRENT top holders but not historical PnL — we mark them as
-    potential cabal members with profit=unknown and let the user
-    verify on GMGN's web UI.
-
-    Better than nothing: the top holders of a Pump.fun runner are very
-    likely the cabal or at least connected to it.
-    """
-    from backend.clients import helius
-    from backend.clients import geckoterminal
-
-    debug: dict = {"label": "helius_fallback"}
-
-    if not helius.configured:
-        debug["error"] = "HELIUS_API_KEY not set"
-        return [], debug
-
-    # Step 1: getTokenLargestAccounts
-    result = await helius._rpc("getTokenLargestAccounts", [mint])
-    if not result or not isinstance(result, dict):
-        debug["error"] = f"getTokenLargestAccounts returned: {type(result)}"
-        return [], debug
-
-    accounts = result.get("value") or []
-    debug["token_accounts_found"] = len(accounts)
-
-    # Step 2: get current price from GeckoTerminal for USD valuation
-    price_usd = 0.0
+async def _get_token_price_usd(mint: str) -> float:
+    """Current USD price for the token from GeckoTerminal."""
     try:
-        token_info = await geckoterminal.token_info("solana", mint)
-        if token_info:
-            attrs = token_info.get("attributes") or {}
-            price_usd = float(attrs.get("price_usd") or 0)
+        info = await geckoterminal.token_info("solana", mint)
+        if info:
+            attrs = info.get("attributes") or {}
+            return float(attrs.get("price_usd") or 0)
     except Exception:
         pass
-    debug["price_usd"] = price_usd
-
-    # Step 3: resolve owner for each token account
-    holders = []
-    skip_addrs = {
-        "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",  # Raydium auth
-        "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium AMM
-        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",   # Pump.fun
-        "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",    # Jupiter lock
-    }
-    for acct in accounts[:limit]:
-        address = acct.get("address")
-        if not address:
-            continue
-        # Amount is in raw units; need decimals
-        amt_str = acct.get("amount")
-        decimals = int(acct.get("decimals") or 0)
-        try:
-            balance = float(amt_str) / (10 ** decimals) if amt_str and decimals else float(amt_str or 0)
-        except Exception:
-            balance = 0.0
-
-        # Resolve the wallet that OWNS this token account
-        info = await helius.get_account_info(address)
-        if not info:
-            continue
-        try:
-            owner = ((info.get("data") or {}).get("parsed") or {}).get("info", {}).get("owner")
-        except Exception:
-            owner = None
-        if not owner or owner in skip_addrs:
-            continue
-
-        value_usd = balance * price_usd if price_usd else 0.0
-
-        holders.append({
-            "address": owner,
-            "realized_profit_usd": 0,  # unknown from on-chain snapshot
-            "unrealized_profit_usd": round(value_usd, 2),
-            "total_profit_usd": round(value_usd, 2),  # estimate: current holdings value
-            "cost_usd": 0,  # unknown
-            "profit_multiplier": 0,  # unknown
-            "balance_tokens": balance,
-            "balance_usd": round(value_usd, 2),
-            "pct_of_supply": 0,
-            "tags": ["helius_fallback"],
-            "is_smart_money": False,
-            "last_active": None,
-            "raw": acct,
-        })
-
-    debug["holders_resolved"] = len(holders)
-    return holders, debug
+    return 0.0
 
 
-def _extract_field(item: dict, *candidates, default=None):
-    """Try multiple possible field names; GMGN's response shape is
-    undocumented so we adapt to whichever fields are present."""
-    for key in candidates:
-        val = item.get(key)
-        if val is not None:
-            return val
-    return default
-
-
-def _to_float(val, default: float = 0.0) -> float:
-    if val is None:
-        return default
+async def _get_sol_price_usd() -> float:
     try:
-        return float(val)
-    except (TypeError, ValueError):
-        return default
+        from backend.clients import defillama
+        prices = await defillama.current_prices(["coingecko:solana"])
+        entry = prices.get("coingecko:solana") or {}
+        return float(entry.get("price") or 0.0)
+    except Exception:
+        return 0.0
 
 
-def _parse_trader(raw: dict) -> dict | None:
-    """Normalize a single trader/holder entry from GMGN into a standard
-    shape. Returns None if the entry lacks enough data to be useful."""
-    addr = _extract_field(
-        raw, "address", "wallet_address", "wallet", "holder_address",
-    )
-    if not addr or len(addr) < 20:
-        return None
-
-    realized = _to_float(_extract_field(
-        raw, "realized_profit", "realized_pnl", "profit", "total_profit",
-        "realized_profit_cur",
-    ))
-    unrealized = _to_float(_extract_field(
-        raw, "unrealized_profit", "unrealized_pnl", "unrealized_profit_cur",
-    ))
-    total_profit = realized + unrealized
-
-    cost = _to_float(_extract_field(
-        raw, "cost", "total_cost", "buy_amount_cur", "buy_volume", "avg_cost",
-    ))
-    # Profit multiplier (X multiple on entry)
-    if cost > 0:
-        profit_mult = total_profit / cost
-    else:
-        profit_mult = 0.0
-
-    balance = _to_float(_extract_field(
-        raw, "balance", "amount", "token_balance", "amount_cur",
-    ))
-    balance_usd = _to_float(_extract_field(
-        raw, "value", "usd_value", "balance_usd",
-    ))
-    pct_held = _to_float(_extract_field(
-        raw, "percentage", "pct", "holder_percentage",
-    ))
-
-    tags = _extract_field(raw, "tags", "labels", "tag", default=[])
-    if isinstance(tags, str):
-        tags = [tags] if tags else []
-
-    is_smart_money = _extract_field(raw, "is_smart_money", "smart_money", default=False)
-    last_active = _extract_field(raw, "last_active_timestamp", "last_active", "timestamp")
-
-    return {
-        "address": addr,
-        "realized_profit_usd": round(realized, 2),
-        "unrealized_profit_usd": round(unrealized, 2),
-        "total_profit_usd": round(total_profit, 2),
-        "cost_usd": round(cost, 2),
-        "profit_multiplier": round(profit_mult, 2),
-        "balance_tokens": balance,
-        "balance_usd": round(balance_usd, 2),
-        "pct_of_supply": round(pct_held, 4),
-        "tags": tags,
-        "is_smart_money": bool(is_smart_money),
-        "last_active": last_active,
-        "raw": raw,
-    }
-
-
-def _extract_list_from_response(data, label: str = "") -> tuple[list[dict], dict]:
+async def _paginate_signatures(mint: str, max_sigs: int) -> list[dict]:
     """
-    GMGN wraps responses in various shapes depending on the endpoint.
-    This function aggressively unwraps until it finds a list of dicts.
-
-    Returns (items, debug_info) where debug_info shows the response
-    shape for troubleshooting field-name mismatches.
+    Pull up to max_sigs signatures for the mint, paginating via `before`.
+    Returns signatures ordered newest → oldest.
     """
-    debug: dict = {"label": label, "type": type(data).__name__}
+    if not helius.configured:
+        return []
+    all_sigs: list[dict] = []
+    before: str | None = None
+    while len(all_sigs) < max_sigs:
+        params: list = [mint, {"limit": min(200, max_sigs - len(all_sigs))}]
+        if before:
+            params[1]["before"] = before
+        batch = await helius._rpc("getSignaturesForAddress", params)
+        if not batch or not isinstance(batch, list):
+            break
+        all_sigs.extend(batch)
+        if len(batch) < 200:
+            break
+        before = batch[-1].get("signature")
+        if not before:
+            break
+    return all_sigs
 
-    if data is None:
-        debug["note"] = "response was None"
-        return [], debug
 
-    if isinstance(data, list):
-        debug["count"] = len(data)
-        if data and isinstance(data[0], dict):
-            debug["first_item_keys"] = list(data[0].keys())[:15]
-        return [x for x in data if isinstance(x, dict)], debug
+def _parse_tx_for_swaps(tx: dict, target_mint: str) -> list[dict]:
+    """
+    Walk a parsed transaction's instructions and extract per-wallet
+    swap events (buy or sell of the target mint).
 
-    if isinstance(data, dict):
-        debug["top_keys"] = list(data.keys())[:20]
-        # Try common wrapper keys
-        for key in ("data", "items", "holders", "traders", "list",
-                     "results", "records", "rows", "tokens"):
-            val = data.get(key)
-            if isinstance(val, list) and val:
-                debug["unwrap_key"] = key
-                debug["count"] = len(val)
-                if isinstance(val[0], dict):
-                    debug["first_item_keys"] = list(val[0].keys())[:15]
-                return [x for x in val if isinstance(x, dict)], debug
-        # Maybe the dict itself IS a single record? Or nested one more level.
-        # Try all values that are lists.
-        for k, v in data.items():
-            if isinstance(v, list) and v and isinstance(v[0], dict):
-                debug["unwrap_key"] = k
-                debug["count"] = len(v)
-                debug["first_item_keys"] = list(v[0].keys())[:15]
-                return v, debug
-        debug["note"] = "dict had no list-valued key"
-        return [], debug
+    Returns list of {wallet, direction, token_amount, sol_amount} where:
+      direction = 'buy' (wallet received target_mint)
+                  or 'sell' (wallet sent target_mint)
+      sol_amount is the SOL side of the swap (approx; Pump.fun pays SOL
+      directly, Raydium may route through wSOL)
+    """
+    events = []
+    try:
+        message = (tx.get("transaction") or {}).get("message") or {}
+        meta = tx.get("meta") or {}
 
-    debug["note"] = f"unexpected type: {type(data)}"
-    return [], debug
+        # account_keys: wallet addresses involved in this tx
+        account_keys = message.get("accountKeys") or []
+        # In jsonParsed format, accountKeys is list of {"pubkey", "signer", "writable", "source"}
+        fee_payer = None
+        if account_keys:
+            first = account_keys[0]
+            fee_payer = first.get("pubkey") if isinstance(first, dict) else str(first)
+
+        # Track SPL token balance changes per owner per mint
+        # meta.preTokenBalances / postTokenBalances give this directly
+        pre = meta.get("preTokenBalances") or []
+        post = meta.get("postTokenBalances") or []
+
+        # Build owner -> balance-change map for the target mint
+        pre_by_key = {}
+        for b in pre:
+            if b.get("mint") != target_mint:
+                continue
+            owner = b.get("owner")
+            if not owner:
+                continue
+            amt = float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0)
+            pre_by_key[owner] = amt
+
+        post_by_key = {}
+        for b in post:
+            if b.get("mint") != target_mint:
+                continue
+            owner = b.get("owner")
+            if not owner:
+                continue
+            amt = float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0)
+            post_by_key[owner] = amt
+
+        all_owners = set(pre_by_key) | set(post_by_key)
+
+        # SOL side: preBalances / postBalances are in lamports, by account key index
+        # The fee payer's net change (minus tx fee) ≈ SOL spent/received
+        pre_sol = meta.get("preBalances") or []
+        post_sol = meta.get("postBalances") or []
+        sol_delta_lamports = 0
+        if pre_sol and post_sol and len(pre_sol) > 0 and len(post_sol) > 0:
+            sol_delta_lamports = post_sol[0] - pre_sol[0]  # fee payer balance change
+        sol_amount = abs(sol_delta_lamports) / LAMPORTS_PER_SOL
+
+        for owner in all_owners:
+            if owner in SKIP_ADDRESSES:
+                continue
+            pre_amt = pre_by_key.get(owner, 0)
+            post_amt = post_by_key.get(owner, 0)
+            delta = post_amt - pre_amt
+            if abs(delta) < 1e-9:
+                continue
+            direction = "buy" if delta > 0 else "sell"
+            events.append({
+                "wallet": owner,
+                "direction": direction,
+                "token_amount": abs(delta),
+                # SOL amount is only accurate for fee_payer; for non-payer
+                # swaps it's a rough upper bound.
+                "sol_amount": sol_amount if owner == fee_payer else 0.0,
+            })
+    except Exception as e:
+        logger.debug(f"parse_tx error: {e}")
+    return events
 
 
 async def extract_cabal_wallets(
@@ -268,99 +192,113 @@ async def extract_cabal_wallets(
     max_wallets: int = DEFAULT_MAX_WALLETS,
 ) -> tuple[list[dict], dict]:
     """
-    Pull top traders + holders for a token mint from GMGN, parse into a
-    normalized list, and filter for likely cabal wallets.
+    Main extraction entry point. Returns (wallets, debug_info).
 
-    Returns (wallets, debug_info) where debug_info shows what GMGN
-    returned at each step (for troubleshooting when wallets_found = 0).
+    Each wallet dict has:
+      address, total_profit_usd, profit_multiplier, cost_usd,
+      balance_usd, balance_tokens, realized_profit_usd,
+      unrealized_profit_usd, tx_count, tags, is_smart_money
     """
-    all_raw: list[dict] = []
-    debug_info: dict = {}
+    debug = {"mint": mint, "source": None}
 
-    # Pull from multiple GMGN endpoints — different data per endpoint.
-    try:
-        traders_raw = await gmgn.token_top_traders(mint, limit=100)
-        items, d = _extract_list_from_response(traders_raw, "top_traders")
-        all_raw.extend(items)
-        debug_info["top_traders"] = d
-    except Exception as e:
-        debug_info["top_traders"] = {"error": str(e)[:200]}
-        logger.warning(f"GMGN top_traders failed for {mint[:10]}: {e}")
+    if not helius.configured:
+        debug["error"] = "HELIUS_API_KEY not configured"
+        return [], debug
 
-    try:
-        holders_raw = await gmgn.token_holders(mint, limit=50)
-        items, d = _extract_list_from_response(holders_raw, "top_holders")
-        all_raw.extend(items)
-        debug_info["top_holders"] = d
-    except Exception as e:
-        debug_info["top_holders"] = {"error": str(e)[:200]}
-        logger.warning(f"GMGN token_holders failed for {mint[:10]}: {e}")
+    token_price_usd = await _get_token_price_usd(mint)
+    sol_price_usd = await _get_sol_price_usd()
+    debug["token_price_usd"] = token_price_usd
+    debug["sol_price_usd"] = sol_price_usd
 
-    try:
-        smart_raw = await gmgn.smart_money_trades(mint)
-        items, d = _extract_list_from_response(smart_raw, "smart_money_trades")
-        all_raw.extend(items)
-        debug_info["smart_money_trades"] = d
-    except Exception as e:
-        debug_info["smart_money_trades"] = {"error": str(e)[:200]}
-        logger.warning(f"GMGN smart_money_trades failed for {mint[:10]}: {e}")
+    sigs = await _paginate_signatures(mint, DEFAULT_MAX_SIGNATURES)
+    debug["signatures_pulled"] = len(sigs)
+    if not sigs:
+        debug["error"] = "no signatures found for mint"
+        return [], debug
 
-    debug_info["total_raw_items_gmgn"] = len(all_raw)
+    # Per-wallet stats
+    wallet_stats: dict[str, dict] = {}
 
-    # Fallback: if GMGN returned nothing (Cloudflare block), use Helius
-    # to get current top holders from on-chain data directly.
-    if not all_raw:
-        logger.info(f"GMGN empty for {mint[:10]} — falling back to Helius top holders")
-        helius_holders, h_debug = await _helius_top_holders(mint, limit=max_wallets)
-        debug_info["helius_fallback"] = h_debug
-        # For Helius fallback, we skip the profit filter (we don't have
-        # PnL data) and add ALL top holders. The user can review + prune.
-        if helius_holders:
-            all_raw.extend(helius_holders)
-            # Return early with relaxed filters for Helius data
-            seen: dict[str, dict] = {}
-            for h in helius_holders:
-                if h["address"] not in seen:
-                    seen[h["address"]] = h
-            result = sorted(seen.values(), key=lambda x: -x["balance_usd"])[:max_wallets]
-            debug_info["total_raw_items"] = len(result)
-            debug_info["source"] = "helius_fallback"
-            debug_info["parsed_count"] = len(result)
-            debug_info["post_filter_count"] = len(result)
-            return result, debug_info
-
-    debug_info["total_raw_items"] = len(all_raw)
-    debug_info["source"] = "gmgn"
-    logger.info(f"extract_cabal: {len(all_raw)} raw entries from GMGN for {mint[:10]}")
-
-    # Parse + dedup
-    seen: dict[str, dict] = {}
-    for raw in all_raw:
-        parsed = _parse_trader(raw)
-        if not parsed:
+    # Parse each transaction. Serial because Helius rate-limits.
+    for sig_meta in sigs:
+        sig = sig_meta.get("signature")
+        if not sig:
             continue
-        addr = parsed["address"]
-        prev = seen.get(addr)
-        # Keep the entry with more data (higher profit or more fields)
-        if prev is None or parsed["total_profit_usd"] > prev["total_profit_usd"]:
-            seen[addr] = parsed
+        tx = await helius.get_transaction(sig)
+        if not tx:
+            continue
+        events = _parse_tx_for_swaps(tx, mint)
+        for e in events:
+            w = e["wallet"]
+            s = wallet_stats.setdefault(w, {
+                "tokens_bought": 0.0,
+                "tokens_sold": 0.0,
+                "sol_spent": 0.0,
+                "sol_received": 0.0,
+                "tx_count": 0,
+            })
+            s["tx_count"] += 1
+            if e["direction"] == "buy":
+                s["tokens_bought"] += e["token_amount"]
+                s["sol_spent"] += e["sol_amount"]
+            else:
+                s["tokens_sold"] += e["token_amount"]
+                s["sol_received"] += e["sol_amount"]
+
+    debug["wallets_parsed"] = len(wallet_stats)
+    debug["source"] = "helius_tx_history"
+
+    # Compute PnL per wallet
+    results = []
+    for addr, s in wallet_stats.items():
+        current_balance = s["tokens_bought"] - s["tokens_sold"]
+        current_value_usd = max(0, current_balance) * token_price_usd
+        cost_usd = s["sol_spent"] * sol_price_usd
+        received_usd = s["sol_received"] * sol_price_usd
+        realized = received_usd - cost_usd  # may be negative if still holding cost
+        # Realized PnL only from the portion that was sold
+        if s["tokens_sold"] > 0 and s["tokens_bought"] > 0:
+            avg_cost_per_token_usd = cost_usd / s["tokens_bought"] if s["tokens_bought"] else 0
+            realized = received_usd - (avg_cost_per_token_usd * s["tokens_sold"])
+        unrealized = current_value_usd - (
+            cost_usd * (max(0, current_balance) / s["tokens_bought"])
+            if s["tokens_bought"] else 0
+        )
+        total_profit = realized + unrealized
+        profit_mult = (total_profit / cost_usd) if cost_usd > 0 else 0.0
+
+        results.append({
+            "address": addr,
+            "cost_usd": round(cost_usd, 2),
+            "realized_profit_usd": round(realized, 2),
+            "unrealized_profit_usd": round(unrealized, 2),
+            "total_profit_usd": round(total_profit, 2),
+            "profit_multiplier": round(profit_mult, 2),
+            "balance_tokens": round(max(0, current_balance), 6),
+            "balance_usd": round(current_value_usd, 2),
+            "pct_of_supply": 0,
+            "tx_count": s["tx_count"],
+            "tokens_bought": round(s["tokens_bought"], 6),
+            "tokens_sold": round(s["tokens_sold"], 6),
+            "is_smart_money": False,
+            "tags": ["helius_tx_history"],
+            "still_holding": current_balance > 0.0001,
+            "fully_exited": s["tokens_sold"] > 0 and current_balance < 0.0001,
+            "raw": None,
+        })
 
     # Filter
-    filtered = []
-    for w in seen.values():
-        if w["total_profit_usd"] < min_profit_usd:
-            continue
-        if w["profit_multiplier"] < min_profit_mult:
-            continue
-        filtered.append(w)
+    filtered = [
+        w for w in results
+        if w["total_profit_usd"] >= min_profit_usd
+        and (w["profit_multiplier"] >= min_profit_mult or w["profit_multiplier"] == 0)
+    ]
 
-    # Sort by total profit descending
+    # Sort by total profit desc
     filtered.sort(key=lambda x: -x["total_profit_usd"])
 
-    # Cap
-    debug_info["parsed_count"] = len(seen)
-    debug_info["post_filter_count"] = len(filtered)
-    return filtered[:max_wallets], debug_info
+    debug["wallets_post_filter"] = len(filtered)
+    return filtered[:max_wallets], debug
 
 
 def add_cabal_wallets_to_db(
@@ -369,36 +307,30 @@ def add_cabal_wallets_to_db(
     source_mint: str,
     source_symbol: str = "",
 ) -> int:
-    """
-    Add extracted wallets to solana_known_wallets with role='cabal_trader'.
-    Returns count of newly added wallets (skips duplicates).
-    """
+    """Insert extracted wallets as role='cabal_trader'. Returns count
+    of newly-added wallets (skips duplicates, upgrades role from
+    'infrastructure' if seen before)."""
     added = 0
     for w in wallets:
         addr = w["address"]
         existing = db.query(SolanaKnownWallet).filter_by(wallet_address=addr).first()
         if existing:
-            # Upgrade role if they were just 'infrastructure' before
             if existing.role == "infrastructure":
                 existing.role = "cabal_trader"
                 existing.associated_mint = source_mint
-                existing.notes = (
-                    f"Upgraded from infrastructure. Profit ${w['total_profit_usd']:,.0f} "
-                    f"({w['profit_multiplier']:.1f}x) on {source_symbol or source_mint[:10]}."
-                )
             continue
 
-        label_parts = [f"${w['total_profit_usd']:,.0f} profit"]
+        status_tag = "exited" if w.get("fully_exited") else (
+            "holding" if w.get("still_holding") else "active"
+        )
+        label_parts = [f"${w['total_profit_usd']:,.0f}"]
         if w["profit_multiplier"] > 0:
-            label_parts.append(f"{w['profit_multiplier']:.0f}x")
-        if w.get("is_smart_money"):
-            label_parts.append("smart money")
-        if w.get("tags"):
-            label_parts.extend(w["tags"][:2])
+            label_parts.append(f"{w['profit_multiplier']:.1f}x")
+        label_parts.append(status_tag)
 
         wallet = SolanaKnownWallet(
             wallet_address=addr,
-            label=f"{source_symbol or 'runner'} cabal — {', '.join(label_parts)}",
+            label=f"{source_symbol or 'runner'} — {', '.join(label_parts)}",
             associated_token=source_symbol or None,
             associated_mint=source_mint,
             role="cabal_trader",
@@ -406,10 +338,10 @@ def add_cabal_wallets_to_db(
             total_profit_est=Decimal(str(round(w["total_profit_usd"], 2))),
             added_at=datetime.utcnow(),
             notes=(
-                f"Extracted from runner {source_symbol or source_mint[:10]}. "
-                f"Cost ${w['cost_usd']:,.0f}, profit ${w['total_profit_usd']:,.0f} "
-                f"({w['profit_multiplier']:.1f}x). "
-                f"Tags: {w.get('tags')}. Smart money: {w.get('is_smart_money')}."
+                f"Extracted from {source_symbol or source_mint[:10]}. "
+                f"Realized ${w['realized_profit_usd']:,.0f}, "
+                f"unrealized ${w['unrealized_profit_usd']:,.0f}. "
+                f"Status: {status_tag}. Tx count: {w['tx_count']}."
             ),
         )
         db.add(wallet)

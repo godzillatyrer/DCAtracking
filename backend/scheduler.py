@@ -1,12 +1,11 @@
 """
-APScheduler job definitions — orchestrates all scanner and tracker jobs.
-Every job run is logged to the scan_logs table for observability.
+APScheduler job definitions — orchestrates pump-and-dump detection,
+wallet tracking, and Solana cabal graph walk.
 
-Memory management: the in-process scheduler runs 18+ jobs on a single
-2GB Render container. Without limits, staggered first-runs caused all
-jobs to fire within ~20 minutes of boot and OOM the container. We use
-a module-level asyncio.Semaphore to cap concurrent job execution to
-MAX_CONCURRENT_JOBS (default 2) and stagger first-runs over ~60 min.
+Memory management: the in-process scheduler runs several jobs on a 4GB
+Render container. We use a module-level asyncio.Semaphore to cap
+concurrent job execution and stagger first-runs across the first hour
+to avoid boot-time spikes.
 """
 
 import asyncio
@@ -31,22 +30,8 @@ from backend.models.flagged_token import FlaggedToken
 from backend.models.watchlist import Watchlist
 from backend.models.known_wallet import KnownWallet
 
-# Phase 2: launch + exploit detection
-from backend.detection.launch_scorer import run_launch_scorer
-from backend.detection.deployer_watcher import run_deployer_watcher
-from backend.detection.whale_fresh_wallet import run_whale_fresh_watcher
-from backend.detection.pair_watcher import run_pair_watcher
-from backend.detection.exploit_watcher import run_exploit_watcher
-from backend.detection.operator_graph import run_operator_graph
-from backend.detection.bytecode_match import run_bytecode_match
-from backend.detection.portfolio_gate import run_portfolio_gate
-from backend.detection.launchpad_watcher import run_launchpad_watcher
-from backend.detection.treasury_outflow import run_treasury_outflow
-
-# Phase 3: Solana detection
-from backend.detection.solana_pair_watcher import run_solana_pair_watcher
-from backend.detection.solana_deployer_watcher import run_solana_deployer_watcher
-from backend.detection.solana_whale_fresh import run_solana_whale_fresh_watcher
+# Solana cabal graph walk — follows where tracked cabal wallets
+# send money so we auto-discover rotated wallets.
 from backend.detection.solana_graph_walk import run_solana_graph_walk
 
 logger = logging.getLogger(__name__)
@@ -54,19 +39,15 @@ logger = logging.getLogger(__name__)
 
 # At most this many jobs may run concurrently. Even though APScheduler's
 # AsyncIOScheduler runs everything in one event loop, parallel jobs each
-# accumulate Python objects (RPC results, ORM rows, log lists). 2GB
-# container OOMs were the result of 5-6 jobs firing simultaneously after
-# their staggered first-runs all elapsed in the same 20-min window.
+# accumulate Python objects. 2GB container OOMs were the result of 5-6
+# heavy jobs firing simultaneously; the semaphore enforces a cap.
 MAX_CONCURRENT_JOBS = 2
 _JOB_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
-# Hard per-job timeout. Any single run that exceeds this gets cancelled
-# so the semaphore is released and subsequent runs proceed normally.
-# Without this, one hung job (e.g. an RPC that never returns) would hold
-# one of the 2 semaphore slots forever, cause the next N scheduled runs
-# to misfire past the 30-min grace, and eventually take the whole
-# pipeline silent — the stale_1h+ pattern we've seen in the audit.
-JOB_TIMEOUT_SECONDS = 8 * 60  # 8 min — longer than any legitimate run
+# Hard per-job timeout. A hung RPC / DB query / external API call is
+# cancelled after this many seconds, releasing the semaphore for the
+# next run. Without this, one stuck job takes the whole pipeline silent.
+JOB_TIMEOUT_SECONDS = 8 * 60
 
 
 def log_scan(job_name: str, status: str, tokens_checked: int = 0,
@@ -97,13 +78,13 @@ def log_scan(job_name: str, status: str, tokens_checked: int = 0,
         db.close()
 
 
+# ─── Job bodies with logging + fire_score_alert integration ───────────
+
 async def run_volume_scanner_job():
-    """Volume scanner with logging."""
     started = datetime.utcnow()
     try:
         await run_volume_scanner()
         finished = datetime.utcnow()
-        # Count current state for the log
         db = SessionLocal()
         try:
             total_raw = db.query(FlaggedToken).filter(
@@ -127,7 +108,6 @@ async def run_volume_scanner_job():
 
 
 async def run_profile_checker_job():
-    """Profile checker with logging."""
     started = datetime.utcnow()
     try:
         await run_profile_checker()
@@ -151,7 +131,6 @@ async def run_profile_checker_job():
 
 
 async def run_wallet_analyzer_job():
-    """Wallet analyzer with logging."""
     started = datetime.utcnow()
     try:
         await run_wallet_analyzer()
@@ -176,7 +155,6 @@ async def run_wallet_analyzer_job():
 
 
 async def run_exchange_flow_job():
-    """Exchange flow monitor with logging."""
     started = datetime.utcnow()
     try:
         await run_exchange_flow_monitor()
@@ -205,7 +183,6 @@ async def run_exchange_flow_job():
 
 
 async def run_social_scanner_job():
-    """Social scanner with logging."""
     started = datetime.utcnow()
     try:
         await run_social_scanner()
@@ -230,15 +207,7 @@ async def run_social_scanner_job():
 
 
 async def run_wallet_tracker_job():
-    """
-    Wallet tracker with logging.
-
-    Notable activities are stored to wallet_activity table only. They do NOT
-    fire alerts directly — instead the scorer reads recent activity and
-    contributes points to the token score (known_operator_present = +30).
-    A Telegram alert is only fired when the combined token score crosses
-    the ALERT_THRESHOLD via run_scorer_job.
-    """
+    """Wallet tracker — stores activities; alerts fire via scorer only."""
     started = datetime.utcnow()
     try:
         notable = await run_wallet_tracker()
@@ -298,7 +267,6 @@ async def run_scorer_job():
             started_at=started, finished_at=finished,
         )
 
-        # Fire alerts
         if alert_candidates:
             db = SessionLocal()
             try:
@@ -318,7 +286,6 @@ async def run_scorer_job():
 
 
 async def run_cleanup_job():
-    """Expire old flags and log."""
     from backend.scanners.volume_scanner import expire_old_flags
 
     started = datetime.utcnow()
@@ -339,103 +306,55 @@ async def run_cleanup_job():
                  started_at=started, finished_at=datetime.utcnow())
 
 
-# ─── Phase 2: launch + exploit detection job wrappers ─────────────────
+# ─── Wrappers with semaphore + timeout + gc ───────────────────────────
 
-def _wrap_launch_job(job_name: str, coro):
-    """
-    Wrap a detection coroutine with:
-      - semaphore-bounded concurrency (max 2 jobs running at once)
-      - hard per-job timeout (JOB_TIMEOUT_SECONDS) so a hung RPC/query
-        can never hold the semaphore longer than one normal run
-      - scan_log entry on success/error/timeout
-      - gc.collect() after each run so large transient lists (RPC log
-        responses, balance dicts, etc.) get freed before the next job
-        kicks off — critical on the 2GB Render container.
-    """
-    async def _wrapped():
-        async with _JOB_SEMAPHORE:
-            started = datetime.utcnow()
-            try:
-                result = await asyncio.wait_for(coro(), timeout=JOB_TIMEOUT_SECONDS)
-                details = str(result) if result is not None else "ok"
-                log_scan(
-                    job_name, "success", details=details,
-                    started_at=started, finished_at=datetime.utcnow(),
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    f"{job_name} timed out after {JOB_TIMEOUT_SECONDS}s — cancelled"
-                )
-                log_scan(
-                    job_name, "error",
-                    error_message=f"timeout after {JOB_TIMEOUT_SECONDS}s (see scheduler.JOB_TIMEOUT_SECONDS)",
-                    started_at=started, finished_at=datetime.utcnow(),
-                )
-            except Exception as e:
-                logger.error(f"{job_name} failed: {e}")
-                log_scan(
-                    job_name, "error", error_message=str(e),
-                    started_at=started, finished_at=datetime.utcnow(),
-                )
-            finally:
-                gc.collect()
-    _wrapped.__name__ = f"run_{job_name}_job"
-    return _wrapped
-
-
-def _wrap_legacy_job(fn):
-    """
-    Apply the same semaphore + timeout + gc discipline to the legacy
-    job functions (volume_scanner, profile_checker, wallet_analyzer,
-    etc.) without rewriting their bodies. They already do their own
-    scan_log writes internally, so here we just guard concurrency,
-    enforce the hard timeout, and force gc afterwards.
-    """
+def _wrap_throttled(fn, job_name: str | None = None):
+    """Apply semaphore-bounded concurrency + hard timeout + gc to any job."""
     async def _wrapped():
         async with _JOB_SEMAPHORE:
             try:
                 await asyncio.wait_for(fn(), timeout=JOB_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
                 logger.error(
-                    f"{fn.__name__} timed out after {JOB_TIMEOUT_SECONDS}s — cancelled"
+                    f"{job_name or fn.__name__} timed out after "
+                    f"{JOB_TIMEOUT_SECONDS}s — cancelled"
                 )
+                if job_name:
+                    log_scan(
+                        job_name, "error",
+                        error_message=f"timeout after {JOB_TIMEOUT_SECONDS}s",
+                        started_at=datetime.utcnow(), finished_at=datetime.utcnow(),
+                    )
+            except Exception as e:
+                logger.error(f"{job_name or fn.__name__} failed: {e}")
             finally:
                 gc.collect()
-    _wrapped.__name__ = fn.__name__ + "_throttled"
+    _wrapped.__name__ = (job_name or fn.__name__) + "_throttled"
     return _wrapped
 
 
-run_deployer_watcher_job   = _wrap_launch_job("deployer_watcher",   run_deployer_watcher)
-run_whale_fresh_job        = _wrap_launch_job("whale_fresh_watcher", run_whale_fresh_watcher)
-run_pair_watcher_job       = _wrap_launch_job("pair_watcher",       run_pair_watcher)
-run_launch_scorer_job      = _wrap_launch_job("launch_scorer",      run_launch_scorer)
-run_exploit_watcher_job    = _wrap_launch_job("exploit_watcher",    run_exploit_watcher)
-run_operator_graph_job     = _wrap_launch_job("operator_graph",     run_operator_graph)
-run_bytecode_match_job     = _wrap_launch_job("bytecode_match",     run_bytecode_match)
-run_portfolio_gate_job     = _wrap_launch_job("portfolio_gate",     run_portfolio_gate)
-run_launchpad_watcher_job  = _wrap_launch_job("launchpad_watcher",  run_launchpad_watcher)
-run_treasury_outflow_job   = _wrap_launch_job("treasury_outflow",   run_treasury_outflow)
-
-# Phase 3 — Solana
-run_solana_pair_job        = _wrap_launch_job("solana_pair_watcher",     run_solana_pair_watcher)
-run_solana_deployer_job    = _wrap_launch_job("solana_deployer_watcher", run_solana_deployer_watcher)
-run_solana_whale_fresh_job = _wrap_launch_job("solana_whale_fresh",      run_solana_whale_fresh_watcher)
-run_solana_graph_walk_job  = _wrap_launch_job("solana_graph_walk",       run_solana_graph_walk)
+async def run_solana_graph_walk_job_inner():
+    """Wraps run_solana_graph_walk with scan_log logging."""
+    started = datetime.utcnow()
+    try:
+        result = await run_solana_graph_walk()
+        log_scan(
+            "solana_graph_walk", "success",
+            details=str(result) if result else "ok",
+            started_at=started, finished_at=datetime.utcnow(),
+        )
+    except Exception as e:
+        logger.error(f"solana_graph_walk failed: {e}")
+        log_scan(
+            "solana_graph_walk", "error",
+            error_message=str(e),
+            started_at=started, finished_at=datetime.utcnow(),
+        )
 
 
 def setup_scheduler() -> AsyncIOScheduler:
     """
     Configure and return the APScheduler instance.
-
-    Memory + concurrency design:
-      - Every job runs through _wrap_legacy_job / _wrap_launch_job which
-        share a module-level Semaphore — at most MAX_CONCURRENT_JOBS run
-        at the same time. This is the primary OOM mitigation.
-      - First-run offsets are spread across ~75 minutes (rather than
-        ~20 min) and ordered so the heaviest jobs never overlap their
-        first runs with each other.
-      - misfire_grace_time is generous so that backed-up jobs simply
-        coalesce instead of stacking up after a long pause.
     """
     scheduler = AsyncIOScheduler(job_defaults={
         "max_instances": 1,
@@ -446,41 +365,20 @@ def setup_scheduler() -> AsyncIOScheduler:
     now = datetime.utcnow()
     M = lambda mins: now + timedelta(minutes=mins)  # noqa: E731
 
-    # All registrations as (id, name, callable, trigger_kwargs, first_run_offset_min).
-    # Offsets are tuned so the heaviest jobs (volume_scanner, wallet_analyzer,
-    # bytecode_match, exploit_watcher) don't first-fire in the same window.
+    # (id, name, callable, trigger_kwargs, first_run_offset_min)
     jobs = [
-        # Light / fast jobs first — these are cheap to run early
-        ("launch_scorer",     "Launch Scorer",           run_launch_scorer_job,     {"minutes": settings.LAUNCH_SCORER_INTERVAL_MIN},        4),
-        ("wallet_tracker",    "Wallet Tracker",          _wrap_legacy_job(run_wallet_tracker_job),    {"minutes": settings.WALLET_TRACK_INTERVAL},  6),
-        ("pair_watcher",      "Pair Watcher",            run_pair_watcher_job,      {"minutes": settings.PAIR_WATCHER_INTERVAL_MIN},        8),
-        ("treasury_outflow",  "Treasury Outflow",        run_treasury_outflow_job,  {"minutes": settings.TREASURY_OUTFLOW_INTERVAL_MIN},   12),
+        # Core BSC pump-detection pipeline
+        ("volume_scanner",    "Volume Scanner",          _wrap_throttled(run_volume_scanner_job, "volume_scanner"),   {"minutes": settings.VOLUME_SCAN_INTERVAL}, 2),
+        ("profile_checker",   "Profile Checker",         _wrap_throttled(run_profile_checker_job, "profile_checker"), {"minutes": settings.PROFILE_CHECK_INTERVAL}, 6),
+        ("wallet_analyzer",   "Wallet Analyzer",         _wrap_throttled(run_wallet_analyzer_job, "wallet_analyzer"), {"minutes": settings.WALLET_ANALYZE_INTERVAL}, 15),
+        ("exchange_flow",     "Exchange Flow Monitor",   _wrap_throttled(run_exchange_flow_job, "exchange_flow"),     {"minutes": settings.EXCHANGE_FLOW_INTERVAL}, 9),
+        ("social_scanner",    "Social Scanner",          _wrap_throttled(run_social_scanner_job, "social_scanner"),   {"minutes": settings.SOCIAL_SCAN_INTERVAL}, 25),
+        ("wallet_tracker",    "Wallet Tracker",          _wrap_throttled(run_wallet_tracker_job, "wallet_tracker"),   {"minutes": settings.WALLET_TRACK_INTERVAL}, 4),
+        ("scorer",            "Score Recalculator",      _wrap_throttled(run_scorer_job, "scorer"),                   {"minutes": settings.SCORE_RECALC_INTERVAL}, 8),
+        ("cleanup",           "Cleanup",                 _wrap_throttled(run_cleanup_job, "cleanup"),                 {"hours": 6}, 30),
 
-        # Medium jobs — RPC-heavy but bounded
-        ("volume_scanner",    "Volume Scanner",          _wrap_legacy_job(run_volume_scanner_job),    {"minutes": settings.VOLUME_SCAN_INTERVAL},   2),
-        ("scorer",            "Score Recalculator",      _wrap_legacy_job(run_scorer_job),            {"minutes": settings.SCORE_RECALC_INTERVAL}, 14),
-        ("profile_checker",   "Profile Checker",         _wrap_legacy_job(run_profile_checker_job),   {"minutes": settings.PROFILE_CHECK_INTERVAL}, 16),
-        ("exchange_flow",     "Exchange Flow Monitor",   _wrap_legacy_job(run_exchange_flow_job),     {"minutes": settings.EXCHANGE_FLOW_INTERVAL}, 18),
-        ("deployer_watcher",  "Golden Deployer Watcher", run_deployer_watcher_job,  {"minutes": settings.DEPLOYER_WATCHER_INTERVAL_MIN},   20),
-        ("whale_fresh_watcher", "Whale→Fresh Funding",   run_whale_fresh_job,       {"minutes": settings.WHALE_FRESH_WATCHER_INTERVAL_MIN}, 25),
-
-        # Heavy jobs — pushed to later first-runs so they don't pile up at boot
-        ("operator_graph",    "Operator Graph",          run_operator_graph_job,    {"minutes": 15}, 30),
-        ("launchpad_watcher", "Launchpad Watcher",       run_launchpad_watcher_job, {"minutes": 30}, 35),
-        ("exploit_watcher",   "Exploit Watcher",         run_exploit_watcher_job,   {"minutes": settings.EXPLOIT_WATCHER_INTERVAL_MIN},   40),
-        ("social_scanner",    "Social Scanner",          _wrap_legacy_job(run_social_scanner_job),    {"minutes": settings.SOCIAL_SCAN_INTERVAL},  45),
-        ("portfolio_gate",    "Portfolio Gate",          run_portfolio_gate_job,    {"minutes": 60}, 50),
-        ("bytecode_match",    "Bytecode Fingerprint",    run_bytecode_match_job,    {"minutes": 30}, 55),
-        ("wallet_analyzer",   "Wallet Analyzer",         _wrap_legacy_job(run_wallet_analyzer_job),   {"minutes": settings.WALLET_ANALYZE_INTERVAL}, 65),
-        ("cleanup",           "Cleanup",                 _wrap_legacy_job(run_cleanup_job),           {"hours": 6}, 75),
-
-        # Phase 3 — Solana detection. All three are skip-and-log when
-        # HELIUS_API_KEY is missing, so they're safe to register before
-        # the user has signed up for Helius.
-        ("solana_pair_watcher",     "Solana Pair Watcher",     run_solana_pair_job,     {"minutes": settings.SOLANA_PAIR_WATCHER_INTERVAL_MIN},     22),
-        ("solana_deployer_watcher", "Solana Deployer Watcher", run_solana_deployer_job, {"minutes": settings.SOLANA_DEPLOYER_WATCHER_INTERVAL_MIN}, 27),
-        ("solana_whale_fresh",      "Solana Whale→Fresh",      run_solana_whale_fresh_job, {"minutes": settings.SOLANA_WHALE_FRESH_INTERVAL_MIN},   33),
-        ("solana_graph_walk",       "Solana Graph Walk",       run_solana_graph_walk_job,  {"minutes": 15},  38),
+        # Solana cabal graph walk — follows money from tracked cabal wallets
+        ("solana_graph_walk", "Solana Graph Walk",       _wrap_throttled(run_solana_graph_walk_job_inner, "solana_graph_walk"), {"minutes": 15}, 12),
     ]
 
     for job_id, name, fn, trigger_kwargs, offset_min in jobs:
