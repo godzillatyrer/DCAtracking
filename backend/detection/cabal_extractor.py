@@ -38,6 +38,101 @@ DEFAULT_MIN_PROFIT_MULT = 3.0    # 3x minimum
 DEFAULT_MAX_WALLETS = 30
 
 
+async def _helius_top_holders(mint: str, limit: int = 20) -> tuple[list[dict], dict]:
+    """
+    Fallback when GMGN returns empty (Cloudflare blocks).
+
+    Uses Solana RPC's getTokenLargestAccounts (top 20 by balance) +
+    getAccountInfo per account to resolve owner wallets. This gives us
+    CURRENT top holders but not historical PnL — we mark them as
+    potential cabal members with profit=unknown and let the user
+    verify on GMGN's web UI.
+
+    Better than nothing: the top holders of a Pump.fun runner are very
+    likely the cabal or at least connected to it.
+    """
+    from backend.clients import helius
+    from backend.clients import geckoterminal
+
+    debug: dict = {"label": "helius_fallback"}
+
+    if not helius.configured:
+        debug["error"] = "HELIUS_API_KEY not set"
+        return [], debug
+
+    # Step 1: getTokenLargestAccounts
+    result = await helius._rpc("getTokenLargestAccounts", [mint])
+    if not result or not isinstance(result, dict):
+        debug["error"] = f"getTokenLargestAccounts returned: {type(result)}"
+        return [], debug
+
+    accounts = result.get("value") or []
+    debug["token_accounts_found"] = len(accounts)
+
+    # Step 2: get current price from GeckoTerminal for USD valuation
+    price_usd = 0.0
+    try:
+        token_info = await geckoterminal.token_info("solana", mint)
+        if token_info:
+            attrs = token_info.get("attributes") or {}
+            price_usd = float(attrs.get("price_usd") or 0)
+    except Exception:
+        pass
+    debug["price_usd"] = price_usd
+
+    # Step 3: resolve owner for each token account
+    holders = []
+    skip_addrs = {
+        "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",  # Raydium auth
+        "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium AMM
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",   # Pump.fun
+        "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",    # Jupiter lock
+    }
+    for acct in accounts[:limit]:
+        address = acct.get("address")
+        if not address:
+            continue
+        # Amount is in raw units; need decimals
+        amt_str = acct.get("amount")
+        decimals = int(acct.get("decimals") or 0)
+        try:
+            balance = float(amt_str) / (10 ** decimals) if amt_str and decimals else float(amt_str or 0)
+        except Exception:
+            balance = 0.0
+
+        # Resolve the wallet that OWNS this token account
+        info = await helius.get_account_info(address)
+        if not info:
+            continue
+        try:
+            owner = ((info.get("data") or {}).get("parsed") or {}).get("info", {}).get("owner")
+        except Exception:
+            owner = None
+        if not owner or owner in skip_addrs:
+            continue
+
+        value_usd = balance * price_usd if price_usd else 0.0
+
+        holders.append({
+            "address": owner,
+            "realized_profit_usd": 0,  # unknown from on-chain snapshot
+            "unrealized_profit_usd": round(value_usd, 2),
+            "total_profit_usd": round(value_usd, 2),  # estimate: current holdings value
+            "cost_usd": 0,  # unknown
+            "profit_multiplier": 0,  # unknown
+            "balance_tokens": balance,
+            "balance_usd": round(value_usd, 2),
+            "pct_of_supply": 0,
+            "tags": ["helius_fallback"],
+            "is_smart_money": False,
+            "last_active": None,
+            "raw": acct,
+        })
+
+    debug["holders_resolved"] = len(holders)
+    return holders, debug
+
+
 def _extract_field(item: dict, *candidates, default=None):
     """Try multiple possible field names; GMGN's response shape is
     undocumented so we adapt to whichever fields are present."""
@@ -210,7 +305,32 @@ async def extract_cabal_wallets(
         debug_info["smart_money_trades"] = {"error": str(e)[:200]}
         logger.warning(f"GMGN smart_money_trades failed for {mint[:10]}: {e}")
 
+    debug_info["total_raw_items_gmgn"] = len(all_raw)
+
+    # Fallback: if GMGN returned nothing (Cloudflare block), use Helius
+    # to get current top holders from on-chain data directly.
+    if not all_raw:
+        logger.info(f"GMGN empty for {mint[:10]} — falling back to Helius top holders")
+        helius_holders, h_debug = await _helius_top_holders(mint, limit=max_wallets)
+        debug_info["helius_fallback"] = h_debug
+        # For Helius fallback, we skip the profit filter (we don't have
+        # PnL data) and add ALL top holders. The user can review + prune.
+        if helius_holders:
+            all_raw.extend(helius_holders)
+            # Return early with relaxed filters for Helius data
+            seen: dict[str, dict] = {}
+            for h in helius_holders:
+                if h["address"] not in seen:
+                    seen[h["address"]] = h
+            result = sorted(seen.values(), key=lambda x: -x["balance_usd"])[:max_wallets]
+            debug_info["total_raw_items"] = len(result)
+            debug_info["source"] = "helius_fallback"
+            debug_info["parsed_count"] = len(result)
+            debug_info["post_filter_count"] = len(result)
+            return result, debug_info
+
     debug_info["total_raw_items"] = len(all_raw)
+    debug_info["source"] = "gmgn"
     logger.info(f"extract_cabal: {len(all_raw)} raw entries from GMGN for {mint[:10]}")
 
     # Parse + dedup
