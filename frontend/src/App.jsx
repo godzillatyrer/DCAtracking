@@ -6,38 +6,42 @@ import WalletTracker from './components/WalletTracker';
 import AlertLog from './components/AlertLog';
 import ScanActivity from './components/ScanActivity';
 import APIStatus from './components/APIStatus';
-
-const LOGO = 'PUMP SCANNER';
+import { colors, typography } from './theme';
 
 const navOuter = {
-  borderBottom: '1px solid #1d1f27',
-  background: 'linear-gradient(180deg, #0e1014 0%, #0b0d12 100%)',
-  backdropFilter: 'blur(8px)',
+  background: 'rgba(255, 255, 255, 0.72)',
+  backdropFilter: 'saturate(180%) blur(20px)',
+  WebkitBackdropFilter: 'saturate(180%) blur(20px)',
+  borderBottom: `1px solid ${colors.border}`,
+  position: 'sticky',
+  top: 0,
+  zIndex: 100,
 };
 
 const navInner = {
   display: 'flex',
-  gap: '32px',
-  padding: '18px 32px',
+  gap: '28px',
+  padding: '16px 32px',
   alignItems: 'center',
   maxWidth: '1400px',
   margin: '0 auto',
 };
 
 const linkStyle = {
-  color: '#7a7f8c',
+  color: colors.textFaint,
   textDecoration: 'none',
   fontSize: '14px',
-  fontWeight: 500,
-  padding: '8px 0',
-  borderBottom: '2px solid transparent',
-  transition: 'color 0.15s, border-color 0.15s',
+  fontWeight: typography.medium,
+  padding: '8px 14px',
+  borderRadius: '8px',
+  transition: 'color 0.15s, background 0.15s',
 };
 
 const activeLinkStyle = {
   ...linkStyle,
-  color: '#f5f7fa',
-  borderBottomColor: '#3b82f6',
+  color: colors.text,
+  background: '#f0f0f3',
+  fontWeight: typography.semibold,
 };
 
 function App() {
@@ -45,26 +49,35 @@ function App() {
     <BrowserRouter>
       <div style={{
         minHeight: '100vh',
-        background: '#0b0d12',
-        color: '#e6e8ec',
-        fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+        background: colors.bg,
+        color: colors.text,
+        fontFamily: typography.sans,
       }}>
         <nav style={navOuter}>
           <div style={navInner}>
             <span style={{
-              color: '#f5f7fa',
-              fontWeight: 700,
-              fontSize: '15px',
-              letterSpacing: '2px',
-              marginRight: '24px',
+              color: colors.text,
+              fontWeight: typography.bold,
+              fontSize: '17px',
+              letterSpacing: '-0.02em',
+              marginRight: '16px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
             }}>
-              <span style={{ color: '#3b82f6' }}>◆</span> {LOGO}
+              <span style={{
+                width: '22px', height: '22px',
+                borderRadius: '6px',
+                background: `linear-gradient(135deg, ${colors.accent} 0%, ${colors.purple} 100%)`,
+                boxShadow: `0 2px 8px ${colors.accentSoft}`,
+              }} />
+              PumpScanner
             </span>
             <NavLink to="/" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle} end>
               Dashboard
             </NavLink>
             <NavLink to="/wallets" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-              Wallet Tracker
+              Wallets
             </NavLink>
             <NavLink to="/alerts" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
               Alerts
@@ -73,11 +86,11 @@ function App() {
               Activity
             </NavLink>
             <NavLink to="/api-status" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-              API Status
+              APIs
             </NavLink>
           </div>
         </nav>
-        <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '32px' }}>
+        <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '40px 32px' }}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/token/:address" element={<TokenDetail />} />
