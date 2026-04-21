@@ -38,6 +38,33 @@ function WalletTracker() {
   const [addForm, setAddForm] = useState({ wallet_address: '', label: '', role: 'accumulator' });
   const [addError, setAddError] = useState(null);
 
+  // Cabal extraction form state
+  const [cabalMint, setCabalMint] = useState('');
+  const [cabalSymbol, setCabalSymbol] = useState('');
+  const [cabalResult, setCabalResult] = useState(null);
+  const [cabalLoading, setCabalLoading] = useState(false);
+
+  async function handleExtractCabal(e) {
+    e.preventDefault();
+    if (!cabalMint.trim()) return;
+    setCabalLoading(true);
+    setCabalResult(null);
+    try {
+      const result = await apiPost('/wallets/solana/extract-from-runner', {
+        mint: cabalMint.trim(),
+        symbol: cabalSymbol.trim() || '',
+        auto_add: true,
+      });
+      setCabalResult(result);
+      if (result.wallets_added > 0) {
+        refetchWallets();
+      }
+    } catch (err) {
+      setCabalResult({ error: err.message });
+    }
+    setCabalLoading(false);
+  }
+
   async function handleAddWallet(e) {
     e.preventDefault();
     try {
@@ -53,6 +80,104 @@ function WalletTracker() {
   return (
     <div>
       <h2 style={{ fontSize: '18px', marginBottom: '20px' }}>Known Wallet Tracker</h2>
+
+      {/* Cabal extraction — paste a runner CA */}
+      <div style={{ ...cardStyle, borderColor: '#44aaff' }}>
+        <h3 style={{ fontSize: '14px', color: '#44aaff', marginBottom: '8px' }}>
+          Extract Cabal Wallets from a Runner
+        </h3>
+        <div style={{ color: '#666', fontSize: '12px', marginBottom: '12px' }}>
+          Paste a Solana token CA that pumped big. The system extracts top holders/traders, adds them to the watchlist, and automatically tracks where they send money next.
+        </div>
+        <form onSubmit={handleExtractCabal} style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <input
+            type="text"
+            value={cabalMint}
+            onChange={(e) => setCabalMint(e.target.value)}
+            placeholder="Solana token CA (e.g. Hon2rH...pump)"
+            style={{
+              flex: 1, minWidth: '300px',
+              background: '#0a0a0f', border: '1px solid #333', color: '#fff',
+              padding: '10px 12px', borderRadius: '4px', fontSize: '13px',
+              fontFamily: 'monospace',
+            }}
+          />
+          <input
+            type="text"
+            value={cabalSymbol}
+            onChange={(e) => setCabalSymbol(e.target.value)}
+            placeholder="Symbol (optional)"
+            style={{
+              width: '140px',
+              background: '#0a0a0f', border: '1px solid #333', color: '#fff',
+              padding: '10px 12px', borderRadius: '4px', fontSize: '13px',
+            }}
+          />
+          <button
+            type="submit"
+            disabled={cabalLoading || !cabalMint.trim()}
+            style={{
+              background: cabalLoading ? '#222' : '#1a1a2e',
+              border: '1px solid #44aaff',
+              color: cabalLoading ? '#555' : '#44aaff',
+              padding: '10px 24px', borderRadius: '4px',
+              cursor: cabalLoading || !cabalMint.trim() ? 'default' : 'pointer',
+              fontSize: '13px', fontWeight: 'bold', whiteSpace: 'nowrap',
+            }}
+          >
+            {cabalLoading ? 'Extracting...' : 'Extract Wallets'}
+          </button>
+        </form>
+
+        {cabalResult && (
+          <div style={{ marginTop: '12px' }}>
+            {cabalResult.error ? (
+              <div style={{ color: '#ff4444', fontSize: '12px' }}>Error: {cabalResult.error}</div>
+            ) : (
+              <>
+                <div style={{
+                  color: cabalResult.wallets_found > 0 ? '#44ff88' : '#ffaa00',
+                  fontSize: '13px', fontWeight: 'bold', marginBottom: '8px',
+                }}>
+                  Found {cabalResult.wallets_found} wallets, added {cabalResult.wallets_added} new to watchlist
+                </div>
+                {cabalResult.wallets && cabalResult.wallets.length > 0 && (
+                  <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                      <thead>
+                        <tr>
+                          <th style={thStyle}>#</th>
+                          <th style={thStyle}>Address</th>
+                          <th style={thStyle}>Balance USD</th>
+                          <th style={thStyle}>Profit</th>
+                          <th style={thStyle}>Mult</th>
+                          <th style={thStyle}>Tags</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cabalResult.wallets.map((w, i) => (
+                          <tr key={w.address}>
+                            <td style={tdStyle}>{i + 1}</td>
+                            <td style={{ ...tdStyle, fontFamily: 'monospace', fontSize: '11px' }}>
+                              {w.address.slice(0, 8)}…{w.address.slice(-6)}
+                            </td>
+                            <td style={tdStyle}>${w.balance_usd?.toLocaleString(undefined, { maximumFractionDigits: 0 }) || '—'}</td>
+                            <td style={{ ...tdStyle, color: w.total_profit_usd > 0 ? '#44ff88' : '#888' }}>
+                              ${w.total_profit_usd?.toLocaleString(undefined, { maximumFractionDigits: 0 }) || '—'}
+                            </td>
+                            <td style={tdStyle}>{w.profit_multiplier ? `${w.profit_multiplier}x` : '—'}</td>
+                            <td style={{ ...tdStyle, color: '#888' }}>{(w.tags || []).join(', ')}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* New accumulations — HIGH PRIORITY */}
       <div style={{ ...cardStyle, borderColor: '#ff4444' }}>
