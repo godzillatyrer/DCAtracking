@@ -1,14 +1,9 @@
 """
 WalletFundingEdge — directed graph of funding relationships.
 
-Every time a watched address sends value to a fresh (low-nonce) address,
-we record an edge. This is the backing store for:
-  - Module 3 (Whale-Funds-Fresh-Wallet → Deploy): find fresh addresses
-    that were funded by a known insider and subsequently deployed a
-    contract within the lookback window.
-  - Module 6 (Same-Operator Different Deployer): match deployers whose
-    gas-funding source is in our operator pool.
-  - Module 13 (Treasury/Multisig Outflow).
+Records an edge each time a tracked cabal wallet sends SOL to a fresh
+recipient. Backing store for solana_graph_walk — lets us trace wallet
+rotations.
 """
 
 from datetime import datetime
@@ -32,14 +27,15 @@ class WalletFundingEdge(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    chain = Column(String(10), default="bsc", nullable=False)
+    chain = Column(String(10), default="solana", nullable=False)
 
     funder_address = Column(String(64), nullable=False)
     recipient_address = Column(String(64), nullable=False)
 
-    amount_native = Column(Numeric(30, 10))  # BNB/ETH/SOL etc.
+    amount_native = Column(Numeric(30, 10))  # SOL
     amount_usd = Column(Numeric(20, 2))
-    tx_hash = Column(String(80))
+    # Solana base58 signatures are 87-88 chars; allow headroom.
+    tx_hash = Column(String(128))
     block_number = Column(BigInteger)
     funded_at = Column(DateTime)
 
@@ -54,7 +50,7 @@ class WalletFundingEdge(Base):
     # Lifecycle: did the recipient deploy a contract after being funded?
     recipient_deployed = Column(Boolean, default=False)
     recipient_deploy_contract = Column(String(64))
-    recipient_deploy_tx = Column(String(80))
+    recipient_deploy_tx = Column(String(128))
     recipient_deploy_at = Column(DateTime)
 
     detected_at = Column(DateTime, default=datetime.utcnow, nullable=False)

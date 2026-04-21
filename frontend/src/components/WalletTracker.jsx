@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApi, apiPost } from '../hooks/useApi';
-import { shortAddress, formatDate } from '../utils/formatters';
+import { formatDate } from '../utils/formatters';
 import {
   colors, typography, spacing, radius,
   card, pageTitle, pageSubtitle, sectionTitle,
@@ -87,10 +87,10 @@ function CabalExtractor({ onSuccess }) {
         marginBottom: spacing.lg,
         lineHeight: 1.5,
       }}>
-        Paste the mint address of a Solana token that just pumped. The system parses
-        on-chain transaction history to identify every early buyer and seller, computes
-        their realized &amp; unrealized PnL, and auto-adds the profitable wallets to your
-        watchlist. The graph walk then follows their money as they rotate into new wallets.
+        Paste the mint address of a Solana token that pumped. The extractor merges
+        GMGN top traders/holders with Helius transaction history, identifies early
+        buyers, and auto-adds them to the watchlist. The graph walk then follows
+        their money as they rotate into fresh wallets.
       </div>
 
       <form onSubmit={extract} style={{
@@ -223,69 +223,27 @@ function CabalExtractor({ onSuccess }) {
 }
 
 function WalletTracker() {
-  const { data: wallets, refetch: refetchWallets } = useApi('/wallets/known?per_page=100', { refreshInterval: 60000 });
-  const { data: newAccum } = useApi('/wallets/new-accumulations?limit=20', { refreshInterval: 30000 });
-  const { data: solWallets, refetch: refetchSolWallets } = useApi('/wallets/solana/known?per_page=100', { refreshInterval: 60000 });
-  const [selectedWallet, setSelectedWallet] = useState(null);
-  const { data: activity } = useApi(
-    `/wallets/${selectedWallet}/activity?per_page=50&flagged_only=true`,
-    { enabled: !!selectedWallet, refreshInterval: 30000 }
+  const { data: solWallets, refetch: refetchSolWallets } = useApi(
+    '/wallets/solana/known?per_page=100', { refreshInterval: 60000 }
   );
 
   return (
     <div>
-      <h1 style={pageTitle}>Wallet Tracker</h1>
+      <h1 style={pageTitle}>Solana Cabal Tracker</h1>
       <div style={pageSubtitle}>
-        On-chain wallet monitoring for known pump-and-dump operators.
-        When they move, you get alerted.
+        Extract cabal wallets from runner CAs, then track them as they
+        rotate into fresh wallets. When multiple tracked wallets buy the
+        same new mint, you get alerted.
       </div>
 
       <CabalExtractor onSuccess={refetchSolWallets} />
 
-      {newAccum && newAccum.length > 0 && (
-        <Section
-          title="New Token Accumulations"
-          subtitle="When a known operator buys a token they didn't hold before — highest-priority signal."
-          accent
-        >
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr>
-                <th style={th}>Operator</th>
-                <th style={th}>From Token</th>
-                <th style={th}>New Token</th>
-                <th style={th}>Amount</th>
-                <th style={th}>Detected</th>
-              </tr>
-            </thead>
-            <tbody>
-              {newAccum.map((a, i) => (
-                <tr key={i}>
-                  <td style={td}>
-                    <div style={{ color: colors.text, fontWeight: typography.medium }}>{a.wallet_label}</div>
-                    <div style={{ color: colors.textFaint, fontSize: typography.tiny, fontFamily: typography.mono, marginTop: 2 }}>
-                      {shortAddress(a.wallet_address)}
-                    </div>
-                  </td>
-                  <td style={{ ...td, color: colors.textDim }}>{a.associated_token || '—'}</td>
-                  <td style={{ ...td, color: colors.danger, fontWeight: typography.semibold }}>
-                    {a.token_symbol || shortAddress(a.token_contract)}
-                  </td>
-                  <td style={{ ...td, fontFamily: typography.mono, color: colors.textDim }}>{a.amount || '—'}</td>
-                  <td style={{ ...td, color: colors.textFaint, fontSize: typography.small }}>{formatDate(a.detected_at)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Section>
-      )}
-
       <Section
-        title="Solana Cabal Wallets"
-        subtitle={`${solWallets?.total || 0} tracked wallets across all runners you've extracted.`}
+        title="Tracked Solana Wallets"
+        subtitle={`${solWallets?.total || 0} wallets across all runners you've extracted.`}
       >
         {solWallets?.items?.length ? (
-          <div style={{ maxHeight: 480, overflowY: 'auto' }}>
+          <div style={{ maxHeight: 560, overflowY: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead style={{ position: 'sticky', top: 0, background: colors.bgElev1 }}>
                 <tr>
@@ -324,116 +282,10 @@ function WalletTracker() {
           </div>
         ) : (
           <div style={{ padding: '48px 16px', textAlign: 'center', color: colors.textFaint }}>
-            No Solana wallets tracked yet. Extract from a runner above to get started.
+            No wallets tracked yet. Extract from a runner above to get started.
           </div>
         )}
       </Section>
-
-      <Section
-        title="Known BSC Operators"
-        subtitle={`${wallets?.total || 0} BSC wallets from historical confirmed pumps + auto-extracted cluster members.`}
-      >
-        {wallets?.items?.length ? (
-          <div style={{ maxHeight: 480, overflowY: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead style={{ position: 'sticky', top: 0, background: colors.bgElev1 }}>
-                <tr>
-                  <th style={th}>Wallet</th>
-                  <th style={th}>Role</th>
-                  <th style={th}>Associated</th>
-                  <th style={th}>Activity</th>
-                  <th style={th}>Added</th>
-                </tr>
-              </thead>
-              <tbody>
-                {wallets.items.map((w) => (
-                  <tr
-                    key={w.wallet_address}
-                    onClick={() => setSelectedWallet(w.wallet_address)}
-                    style={{ cursor: 'pointer' }}
-                    onMouseEnter={(e) => e.currentTarget.style.background = colors.bgHover}
-                    onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-                  >
-                    <td style={td}>
-                      <div style={{ color: colors.text, fontWeight: typography.medium }}>
-                        {w.label || shortAddress(w.wallet_address)}
-                      </div>
-                      <div style={{ color: colors.textFaint, fontSize: typography.tiny, fontFamily: typography.mono, marginTop: 2 }}>
-                        {shortAddress(w.wallet_address)}
-                      </div>
-                    </td>
-                    <td style={td}>
-                      <span style={pill(w.role === 'golden_deployer' ? 'danger' : 'default')}>
-                        {w.role}
-                      </span>
-                    </td>
-                    <td style={{ ...td, color: colors.textDim }}>{w.associated_token || '—'}</td>
-                    <td style={{ ...td, fontFamily: typography.mono }}>{w.token_count || 0} tokens</td>
-                    <td style={{ ...td, color: colors.textFaint, fontSize: typography.small }}>
-                      {formatDate(w.added_at)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div style={{ padding: '48px 16px', textAlign: 'center', color: colors.textFaint }}>
-            No BSC operators tracked yet.
-          </div>
-        )}
-      </Section>
-
-      {selectedWallet && activity && (
-        <Section
-          title="Activity Feed"
-          subtitle={`Recent flagged activity for ${shortAddress(selectedWallet)}`}
-        >
-          <button
-            onClick={() => setSelectedWallet(null)}
-            style={{
-              background: 'transparent',
-              border: `1px solid ${colors.borderStrong}`,
-              color: colors.textDim,
-              padding: '6px 12px',
-              borderRadius: radius.sm,
-              fontSize: typography.small,
-              cursor: 'pointer',
-              marginBottom: spacing.md,
-            }}
-          >
-            Close
-          </button>
-          {activity.items?.length ? (
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={th}>Type</th>
-                  <th style={th}>Token</th>
-                  <th style={th}>Amount</th>
-                  <th style={th}>When</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activity.items.map((a) => (
-                  <tr key={a.id}>
-                    <td style={td}>
-                      <span style={pill(a.activity_type === 'new_token_accumulation' ? 'danger' : 'default')}>
-                        {a.activity_type}
-                      </span>
-                    </td>
-                    <td style={td}>{a.token_symbol || shortAddress(a.token_contract)}</td>
-                    <td style={{ ...td, fontFamily: typography.mono }}>{a.amount}</td>
-                    <td style={{ ...td, color: colors.textFaint }}>{formatDate(a.detected_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <div style={{ color: colors.textFaint, padding: spacing.lg }}>No flagged activity.</div>
-          )}
-        </Section>
-      )}
     </div>
   );
 }
