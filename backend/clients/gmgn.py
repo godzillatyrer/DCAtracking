@@ -54,10 +54,24 @@ class GMGNClient:
             {"limit": limit},
         ) or []
 
+    async def token_top_traders(self, token_address: str, limit: int = 100) -> list[dict]:
+        """Top traders of a token — ranked by PnL. Best source for
+        extracting cabal wallets from a runner CA."""
+        return await self._get(
+            f"/tokens/top_traders/sol/{token_address}",
+            {"limit": limit},
+        ) or []
+
     async def smart_money_trades(self, token_address: str) -> list[dict]:
         """Recent trades on a token by GMGN-labeled smart money."""
         return await self._get(
             f"/tokens/smart_money_trades/sol/{token_address}"
+        ) or []
+
+    async def wallet_holdings(self, wallet_address: str) -> list[dict]:
+        """Current token holdings for a Solana wallet."""
+        return await self._get(
+            f"/wallet/holdings/sol/{wallet_address}"
         ) or []
 
 

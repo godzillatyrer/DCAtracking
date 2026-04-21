@@ -36,6 +36,7 @@ const JOB_LABELS = {
   solana_deployer_watcher: { label: 'Solana Deployer Watcher', icon: '~12m', desc: 'New SPL mints — matches mint authority against known operators' },
   solana_whale_fresh:      { label: 'Solana Whale→Fresh',      icon: '~12m', desc: 'Solana whale SOL transfers to fresh wallets (TRUMP pattern, M3)' },
   solana_seeder:           { label: 'Solana Seeder',           icon: 'manual', desc: 'Seeds public Solana infrastructure rows + provides chain bootstrap' },
+  solana_graph_walk:       { label: 'Solana Graph Walk',       icon: '~15m',   desc: 'Follows cabal money flow — discovers rotated wallets automatically' },
 };
 
 function statusBadge(status) {
