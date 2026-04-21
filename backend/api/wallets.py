@@ -271,18 +271,13 @@ async def extract_from_runner(
     """
     Paste a Solana runner CA → extract early profitable wallets from GMGN
     → optionally auto-add to solana_known_wallets as role='cabal_trader'.
-
-    These wallets then feed into the detection pipeline:
-      - Module 5 alerts when ≥3 of them buy into a new launch early
-      - Module 3 alerts when they fund a fresh wallet that deploys
-      - Graph walk follows their money to discover rotated wallets
     """
     from backend.detection.cabal_extractor import (
         extract_cabal_wallets,
         add_cabal_wallets_to_db,
     )
 
-    wallets = await extract_cabal_wallets(
+    wallets, debug = await extract_cabal_wallets(
         req.mint,
         min_profit_usd=req.min_profit_usd,
         min_profit_mult=req.min_profit_mult,
@@ -313,6 +308,8 @@ async def extract_from_runner(
             }
             for w in wallets
         ],
+        # Debug: shows what GMGN actually returned so we can fix parsing
+        "debug_gmgn_response_shapes": debug,
     }
 
 
