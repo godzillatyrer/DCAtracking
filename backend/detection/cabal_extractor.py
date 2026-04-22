@@ -42,7 +42,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_MIN_PROFIT_USD = 500.0
 DEFAULT_MIN_PROFIT_MULT = 0.0
 DEFAULT_MAX_WALLETS = 60
-DEFAULT_MAX_SIGNATURES = 1500  # covers early buyers on most pump.fun runners
+DEFAULT_MAX_SIGNATURES = 600  # balanced: catches most early buyers without
+                              # blowing past Helius free-tier rate limits
+HELIUS_CONCURRENCY = 10       # parallel getTransaction calls; free tier is
+                              # ~10 req/sec, stay under that
 LAMPORTS_PER_SOL = 1_000_000_000
 
 SKIP_ADDRESSES = {
@@ -250,10 +253,27 @@ async def _collect_helius_top_holders(
         if not result or not isinstance(result, dict):
             debug["helius_top_holders"] = f"bad response: {type(result)}"
             return
-        accounts = result.get("value") or []
+        accounts = (result.get("value") or [])[:30]
         debug["helius_top_holders_count"] = len(accounts)
 
-        for acct in accounts[:30]:
+        # Parallelize the per-account getAccountInfo calls — 30 sequential
+        # RPCs at ~250ms each = 7s. With HELIUS_CONCURRENCY it's <1s.
+        sem = asyncio.Semaphore(HELIUS_CONCURRENCY)
+
+        async def _resolve(addr: str):
+            async with sem:
+                return await helius.get_account_info(addr)
+
+        addrs = [a.get("address") for a in accounts if a.get("address")]
+        infos = await asyncio.gather(
+            *[_resolve(a) for a in addrs], return_exceptions=True
+        )
+        info_by_addr = {
+            a: i for a, i in zip(addrs, infos)
+            if i and not isinstance(i, Exception)
+        }
+
+        for acct in accounts:
             address = acct.get("address")
             if not address:
                 continue
@@ -264,7 +284,7 @@ async def _collect_helius_top_holders(
             except Exception:
                 balance = 0.0
 
-            acc_info = await helius.get_account_info(address)
+            acc_info = info_by_addr.get(address)
             if not acc_info:
                 continue
             try:
@@ -401,13 +421,24 @@ async def _collect_helius_tx_history(
         if not sigs:
             return
 
+        # Fetch tx bodies in bounded-concurrency batches. Sequential
+        # with 50ms sleep/call is ~250s for 600 sigs — the browser
+        # times out. At 10 concurrent we're ~25s, well under the
+        # Helius free-tier 10 req/sec budget.
+        sem = asyncio.Semaphore(HELIUS_CONCURRENCY)
+
+        async def _fetch(sig: str) -> dict | None:
+            async with sem:
+                return await helius.get_transaction(sig)
+
+        sig_ids = [s.get("signature") for s in sigs if s.get("signature")]
+        tx_results = await asyncio.gather(
+            *[_fetch(s) for s in sig_ids], return_exceptions=True
+        )
+
         wallet_stats: dict[str, dict] = {}
-        for sig_meta in sigs:
-            sig = sig_meta.get("signature")
-            if not sig:
-                continue
-            tx = await helius.get_transaction(sig)
-            if not tx:
+        for tx in tx_results:
+            if not tx or isinstance(tx, Exception):
                 continue
             for e in _parse_tx_for_swaps(tx, mint):
                 w = e["wallet"]
