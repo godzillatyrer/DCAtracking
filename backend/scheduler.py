@@ -15,6 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.database import SessionLocal
 from backend.detection.solana_graph_walk import run_solana_graph_walk
+from backend.detection.wallet_activity_tracker import run_wallet_activity_tracker
 from backend.models.scan_log import ScanLog
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,19 @@ async def run_solana_graph_walk_job():
                  started_at=started, finished_at=datetime.utcnow())
 
 
+async def run_wallet_activity_tracker_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_wallet_activity_tracker()
+        log_scan("wallet_activity_tracker", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"wallet_activity_tracker failed: {e}")
+        log_scan("wallet_activity_tracker", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
 def setup_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(job_defaults={
         "max_instances": 1,
@@ -96,6 +110,13 @@ def setup_scheduler() -> AsyncIOScheduler:
         id="solana_graph_walk", name="Solana Graph Walk",
         minutes=15,
         next_run_time=now + timedelta(minutes=2),
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_wallet_activity_tracker_job, "wallet_activity_tracker"),
+        "interval",
+        id="wallet_activity_tracker", name="Wallet Activity Tracker",
+        minutes=5,
+        next_run_time=now + timedelta(seconds=30),
     )
 
     return scheduler
