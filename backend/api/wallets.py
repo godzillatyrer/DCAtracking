@@ -7,12 +7,19 @@ Endpoints:
   GET  /api/wallets/solana/known                  — list tracked wallets
 """
 
-from fastapi import APIRouter, Depends, Query
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.models.solana_known_wallet import SolanaKnownWallet
+
+# Hard upper bound on a single extract request. Even with parallelized
+# RPCs, a degraded Helius or a very deep history can stretch out — we'd
+# rather the frontend get a clear error than a silent hang.
+EXTRACT_TIMEOUT_SECONDS = 90
 
 router = APIRouter(prefix="/api/wallets", tags=["wallets"])
 
@@ -42,12 +49,24 @@ async def extract_from_runner(
         add_cabal_wallets_to_db,
     )
 
-    wallets, debug = await extract_cabal_wallets(
-        req.mint,
-        min_profit_usd=req.min_profit_usd,
-        min_profit_mult=req.min_profit_mult,
-        max_wallets=req.max_wallets,
-    )
+    try:
+        wallets, debug = await asyncio.wait_for(
+            extract_cabal_wallets(
+                req.mint,
+                min_profit_usd=req.min_profit_usd,
+                min_profit_mult=req.min_profit_mult,
+                max_wallets=req.max_wallets,
+            ),
+            timeout=EXTRACT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Extraction timed out after {EXTRACT_TIMEOUT_SECONDS}s. "
+                "Likely a slow Helius response or rate limit. Try again."
+            ),
+        )
 
     added = 0
     if req.auto_add and wallets:
