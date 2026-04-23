@@ -133,21 +133,209 @@ def _format_convergence(event: dict) -> str:
     )
 
 
+# ─── Sniper-solo format ──────────────────────────────────────────────
+
+def _format_sniper_solo(event: dict) -> str:
+    """event: {mint, wallet, value_usd, role, confidence,
+              avg_buy_size_usd, avg_exit_multiplier, best_mint_profit_usd,
+              win_count, loss_count, win_rate, net_profit_usd,
+              mints_closed, symbol, name, market}"""
+    mint = event["mint"]
+    wallet = event["wallet"]
+    symbol = event.get("symbol") or ""
+    name = event.get("name") or ""
+    mkt = event.get("market") or {}
+
+    title_label = symbol or _short(mint)
+    title = f"🎯 <b>Sniper solo buy</b> · {title_label}"
+    if name and name != symbol:
+        title += f" <i>({name})</i>"
+
+    market_lines = []
+    if mkt.get("market_cap_usd"):
+        market_lines.append(f"<b>MC:</b> {_fmt_usd(mkt['market_cap_usd'])}")
+    if mkt.get("liquidity_usd"):
+        market_lines.append(f"<b>Liq:</b> {_fmt_usd(mkt['liquidity_usd'])}")
+    if mkt.get("volume_24h_usd"):
+        market_lines.append(f"<b>Vol 24h:</b> {_fmt_usd(mkt['volume_24h_usd'])}")
+    market_line = " · ".join(market_lines) if market_lines else "<i>no pair data yet</i>"
+
+    win_pct = int(event.get("win_rate", 0) * 100)
+    win_count = event.get("win_count", 0)
+    loss_count = event.get("loss_count", 0)
+
+    return (
+        f"{title}\n\n"
+        f"<b>CA:</b> <code>{mint}</code>\n"
+        f"{market_line}\n"
+        f"<b>Wallet:</b> <code>{_short(wallet)}</code>"
+        f" ★{event.get('confidence', 0):.1f}"
+        f"\n<b>This buy:</b> {_fmt_usd(event.get('value_usd'))}"
+        f"\n\n"
+        f"<b>Sniper profile:</b>\n"
+        f"  • Avg entry: {_fmt_usd(event.get('avg_buy_size_usd'))}\n"
+        f"  • Avg exit: {event.get('avg_exit_multiplier', 0):.1f}x\n"
+        f"  • Win rate: {win_pct}% ({win_count}W / {loss_count}L over "
+        f"{event.get('mints_closed', 0)} closed positions)\n"
+        f"  • Best mint: +{_fmt_usd(event.get('best_mint_profit_usd'))}\n"
+        f"  • Net lifetime: {_fmt_usd(event.get('net_profit_usd'))}\n\n"
+        f'<a href="https://dexscreener.com/solana/{mint}">DEX Screener</a> · '
+        f'<a href="https://gmgn.ai/sol/token/{mint}">GMGN</a> · '
+        f'<a href="https://pump.fun/coin/{mint}">pump.fun</a> · '
+        f'<a href="https://solscan.io/account/{wallet}">Wallet</a>'
+    )
+
+
+async def fire_sniper_solo_alert(event: dict, db: Session | None = None) -> int | None:
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+
+    mint = event["mint"]
+    symbol = event.get("symbol") or None
+    mkt = event.get("market") or {}
+    reason = (
+        f"Sniper wallet {_short(event['wallet'])} (avg "
+        f"{_fmt_usd(event.get('avg_buy_size_usd'))} entry, "
+        f"{event.get('avg_exit_multiplier', 0):.1f}x avg exit) "
+        f"bought a new mint."
+    )
+
+    try:
+        alert = Alert(
+            contract_address=mint,
+            token_symbol=(symbol[:128] if symbol else None),
+            alert_type="sniper_solo",
+            trigger_reason=reason,
+            mc_at_alert=mkt.get("market_cap_usd") or None,
+            price_at_alert=mkt.get("price_usd") or None,
+            telegram_sent=False,
+            fired_at=datetime.utcnow(),
+        )
+        db.add(alert)
+        db.commit()
+    except Exception as e:
+        logger.error(f"fire_sniper_solo_alert: Alert INSERT failed: {e}")
+        try:
+            db.rollback()
+        finally:
+            if close_db:
+                db.close()
+        return None
+
+    try:
+        message = _format_sniper_solo(event)
+        msg_id = await send_telegram_message(message)
+        if msg_id is not None:
+            alert.telegram_sent = True
+            alert.telegram_message_id = msg_id
+            db.commit()
+    except Exception as e:
+        logger.error(f"fire_sniper_solo_alert: Telegram send failed: {e}")
+    finally:
+        if close_db:
+            db.close()
+    return alert.id
+
+
+# ─── Cabal exit alert ────────────────────────────────────────────────
+
+def _format_cabal_exit(event: dict) -> str:
+    mint = event["mint"]
+    symbol = event.get("symbol") or ""
+    mkt = event.get("market") or {}
+    title_label = symbol or _short(mint)
+    title = f"⚠️ <b>Cabal exiting</b> · {title_label}"
+
+    market_line = ""
+    if mkt.get("market_cap_usd"):
+        market_line = f"<b>MC now:</b> {_fmt_usd(mkt['market_cap_usd'])}"
+        if mkt.get("liquidity_usd"):
+            market_line += f" · <b>Liq:</b> {_fmt_usd(mkt['liquidity_usd'])}"
+
+    wallet_lines = []
+    for w in event["wallets"][:8]:
+        size = w.get("value_usd", 0.0) or 0.0
+        size_bit = f" · {_fmt_usd(size)}" if size else ""
+        wallet_lines.append(
+            f"  • <code>{_short(w['address'])}</code>{size_bit}"
+        )
+
+    return (
+        f"{title}\n\n"
+        f"<b>CA:</b> <code>{mint}</code>\n"
+        + (market_line + "\n" if market_line else "")
+        + f"<b>Sellers:</b> {event['cabal_count']} wallets from the same cluster "
+        + f"sold {_fmt_usd(event.get('total_value_usd', 0))} "
+        + f"in the last {event.get('window_min', 10)}m\n"
+        + "\n" + "\n".join(wallet_lines)
+        + f"\n\n"
+        f'<a href="https://dexscreener.com/solana/{mint}">DEX Screener</a> · '
+        f'<a href="https://gmgn.ai/sol/token/{mint}">GMGN</a>'
+    )
+
+
+async def fire_cabal_exit_alert(event: dict, db: Session | None = None) -> int | None:
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+
+    mint = event["mint"]
+    symbol = event.get("symbol") or None
+    mkt = event.get("market") or {}
+    reason = (
+        f"{event['cabal_count']} wallets from the same cluster sold "
+        f"{_fmt_usd(event.get('total_value_usd', 0))} in "
+        f"{event.get('window_min', 10)}m"
+    )
+    try:
+        alert = Alert(
+            contract_address=mint,
+            token_symbol=(symbol[:128] if symbol else None),
+            alert_type="cabal_exit",
+            trigger_reason=reason,
+            mc_at_alert=mkt.get("market_cap_usd") or None,
+            price_at_alert=mkt.get("price_usd") or None,
+            telegram_sent=False,
+            fired_at=datetime.utcnow(),
+        )
+        db.add(alert)
+        db.commit()
+    except Exception as e:
+        logger.error(f"fire_cabal_exit_alert: Alert INSERT failed: {e}")
+        try:
+            db.rollback()
+        finally:
+            if close_db:
+                db.close()
+        return None
+
+    try:
+        msg_id = await send_telegram_message(_format_cabal_exit(event))
+        if msg_id is not None:
+            alert.telegram_sent = True
+            alert.telegram_message_id = msg_id
+            db.commit()
+    except Exception as e:
+        logger.error(f"fire_cabal_exit_alert: Telegram send failed: {e}")
+    finally:
+        if close_db:
+            db.close()
+    return alert.id
+
+
 # ─── Entry point used by the alert dispatcher ────────────────────────
 
-async def fire_cabal_alert(event: dict, db: Session | None = None) -> bool:
-    """Persist + send ONE convergence alert.
+async def fire_cabal_alert(event: dict, db: Session | None = None) -> int | None:
+    """Persist + send ONE convergence alert. Returns the Alert id on
+    success (row persisted; Telegram delivery is best-effort), None
+    on DB write failure.
 
-    `event` must contain at minimum: mint, wallets (list of dicts with
-    address/role/confidence/value_usd). Market info and symbol/name
-    are optional but recommended for formatting.
-
-    Returns True if an alert was persisted (whether or not Telegram
-    actually delivered). Returns False only if the DB write failed.
-
-    Persisting the Alert row is the FIRST real side effect — dedup
-    relies on it. If Telegram blips, we still want the row recorded
-    so we don't double-fire on the next cycle.
+    Persisting the Alert row is the FIRST side effect — dedup relies
+    on it. If Telegram blips, we still have the row so we don't
+    double-fire next cycle.
     """
     close_db = False
     if db is None:
@@ -156,9 +344,10 @@ async def fire_cabal_alert(event: dict, db: Session | None = None) -> bool:
 
     mint = event["mint"]
     symbol = event.get("symbol") or None
+    mkt = event.get("market") or {}
     reason = event.get("trigger_reason") or (
         f"{event.get('cabal_count', 0)} same-cabal wallets bought "
-        f"(MC {_fmt_usd(event.get('market', {}).get('market_cap_usd'))})"
+        f"(MC {_fmt_usd(mkt.get('market_cap_usd'))})"
     )
 
     try:
@@ -167,6 +356,8 @@ async def fire_cabal_alert(event: dict, db: Session | None = None) -> bool:
             token_symbol=(symbol[:128] if symbol else None),
             alert_type="cabal_convergence",
             trigger_reason=reason,
+            mc_at_alert=mkt.get("market_cap_usd") or None,
+            price_at_alert=mkt.get("price_usd") or None,
             telegram_sent=False,
             fired_at=datetime.utcnow(),
         )
@@ -174,17 +365,15 @@ async def fire_cabal_alert(event: dict, db: Session | None = None) -> bool:
         db.commit()
     except Exception as e:
         logger.error(
-            f"fire_cabal_alert: Alert INSERT failed for mint {mint[:10]}: {e}. "
-            "Dedup is broken until this is fixed — aborting send."
+            f"fire_cabal_alert: Alert INSERT failed for mint {mint[:10]}: {e}"
         )
         try:
             db.rollback()
         finally:
             if close_db:
                 db.close()
-        return False
+        return None
 
-    # Now send — a failure here doesn't break dedup.
     try:
         message = _format_convergence(event)
         msg_id = await send_telegram_message(message)
@@ -197,4 +386,4 @@ async def fire_cabal_alert(event: dict, db: Session | None = None) -> bool:
     finally:
         if close_db:
             db.close()
-    return True
+    return alert.id

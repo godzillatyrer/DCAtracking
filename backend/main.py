@@ -20,6 +20,7 @@ from backend.database import Base, engine
 from backend.scheduler import setup_scheduler
 from backend.api.wallets import router as wallets_router
 from backend.api.diagnostics import router as diagnostics_router
+from backend.api.settings import router as settings_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +50,20 @@ def _widen_solana_sig_columns() -> None:
         "ALTER COLUMN contract_address TYPE VARCHAR(64)",
         "ALTER TABLE alerts "
         "ALTER COLUMN token_symbol TYPE VARCHAR(128)",
+        # Sniper profile columns (added post-launch). IF NOT EXISTS is
+        # idempotent — safe to re-run every boot.
+        "ALTER TABLE solana_wallet_stats "
+        "ADD COLUMN IF NOT EXISTS avg_buy_size_usd NUMERIC(20, 2)",
+        "ALTER TABLE solana_wallet_stats "
+        "ADD COLUMN IF NOT EXISTS avg_exit_multiplier NUMERIC(10, 2)",
+        "ALTER TABLE solana_wallet_stats "
+        "ADD COLUMN IF NOT EXISTS is_sniper BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE solana_wallet_stats "
+        "ADD COLUMN IF NOT EXISTS is_dormant BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE alerts "
+        "ADD COLUMN IF NOT EXISTS mc_at_alert NUMERIC(20, 2)",
+        "ALTER TABLE alerts "
+        "ADD COLUMN IF NOT EXISTS price_at_alert NUMERIC(30, 12)",
     ]
     try:
         with engine.begin() as conn:
@@ -62,6 +77,50 @@ def _widen_solana_sig_columns() -> None:
 
 
 _widen_solana_sig_columns()
+
+
+def _seed_cex_addresses() -> None:
+    """Idempotent: add any CEX addresses from data/cex_addresses.json
+    that aren't already in the table."""
+    import json as _json
+    from backend.database import SessionLocal
+    from backend.models.cex_address import CexAddress
+
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "data", "cex_addresses.json"
+    )
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path) as f:
+            entries = _json.load(f) or []
+    except Exception as e:
+        logger.warning(f"CEX seed load failed: {e}")
+        return
+    if not entries:
+        return
+    db = SessionLocal()
+    try:
+        existing = {r[0] for r in db.query(CexAddress.address).all()}
+        added = 0
+        for e in entries:
+            if e.get("address") and e["address"] not in existing:
+                db.add(CexAddress(
+                    address=e["address"], name=e.get("name") or "Unknown",
+                    exchange=e.get("exchange") or None, is_active=True,
+                ))
+                added += 1
+        if added:
+            db.commit()
+            logger.info(f"CEX seed: added {added} addresses")
+    except Exception as e:
+        logger.warning(f"CEX seed failed: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+_seed_cex_addresses()
 
 
 _scheduler = None
@@ -97,6 +156,7 @@ app.add_middleware(
 
 app.include_router(wallets_router)
 app.include_router(diagnostics_router)
+app.include_router(settings_router)
 
 
 @app.get("/api/health")

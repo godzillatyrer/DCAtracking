@@ -1,0 +1,16 @@
+[
+  {"address": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9", "name": "Binance 1", "exchange": "binance"},
+  {"address": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", "name": "Binance 2", "exchange": "binance"},
+  {"address": "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S", "name": "Binance 3", "exchange": "binance"},
+  {"address": "3AXbB6nMuLnW5Zd4qdK7BGvv3Fok24eJjxX2yUGwZ1Qn", "name": "Binance Hot", "exchange": "binance"},
+  {"address": "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS", "name": "Coinbase 1", "exchange": "coinbase"},
+  {"address": "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm", "name": "Coinbase 2", "exchange": "coinbase"},
+  {"address": "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5", "name": "Kraken", "exchange": "kraken"},
+  {"address": "AobVSwdW9BbpMdJvTqeCN4hPAmh4rHm7vwLnQLFPShyU", "name": "OKX 1", "exchange": "okx"},
+  {"address": "5VCwKtCXgCJ6kit5FybXjvriW3xELsFDhYrPSqtJNmcD", "name": "OKX 2", "exchange": "okx"},
+  {"address": "7Xb2Ro8JdgmehiqeuXtv3fGqnKHaG9CWHPNhyRTvXN6W", "name": "Bybit", "exchange": "bybit"},
+  {"address": "CNpF8grcwnCTsn5P39ohAcK3BKBUG7izKVvBNHbKfU8R", "name": "Gate.io", "exchange": "gate"},
+  {"address": "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2", "name": "Bitget", "exchange": "bitget"},
+  {"address": "BmFdpraQhkiDQE6SnfG5omcA1VwzqfXrwtNYBwWTymy6", "name": "KuCoin 1", "exchange": "kucoin"},
+  {"address": "HVh6wHNBAsG3pq1Bj5oCzRjoWKVogEDHwUHkRz3ekFgt", "name": "MEXC", "exchange": "mexc"}
+]

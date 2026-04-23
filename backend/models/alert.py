@@ -14,13 +14,18 @@ class Alert(Base):
     contract_address = Column(String(64), nullable=False)
     token_symbol = Column(String(50))
 
-    alert_type = Column(String(50))  # cabal_buy, graph_walk_discovery, ...
+    alert_type = Column(String(50))  # cabal_convergence | sniper_solo | cabal_exit
     trigger_reason = Column(Text)
     telegram_sent = Column(Boolean, default=False)
     telegram_message_id = Column(Integer)
     fired_at = Column(DateTime, default=datetime.utcnow)
 
-    # Optional outcome tracking
+    # Snapshot at fire time (for outcome tracking)
+    mc_at_alert = Column(Numeric(20, 2))
+    price_at_alert = Column(Numeric(30, 12))
+
+    # Legacy outcome summary fields (kept for compatibility; the real
+    # per-alert outcome lives in alert_outcomes).
     outcome = Column(String(20))
     peak_pct_from_alert = Column(Numeric(10, 2))
     reviewed = Column(Boolean, default=False)

@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import func
 
+from backend import settings_cache
 from backend.database import SessionLocal
 from backend.models.solana_known_wallet import SolanaKnownWallet
 from backend.models.solana_wallet_activity import SolanaWalletActivity
@@ -136,6 +137,50 @@ def _compute_confidence(
     return round(base * (1.0 + win_bonus) * recency, 2)
 
 
+# ─── Sniper classification ─────────────────────────────────────────────
+#
+# "Very low entries + insane profit each time" — the user's words.
+# A wallet that routinely buys tiny amounts ($50-500) and exits 5-50x
+# more than it put in. This is the profile that makes for the best
+# SOLO alerts: even a single buy from one of these is a strong signal
+# because their track record demonstrates they only enter before a
+# real pump.
+
+def _compute_sniper(
+    avg_buy_size_usd: float | None, avg_exit_multiplier: float | None,
+    win_count: int, loss_count: int, mints_closed: int,
+    net_profit_usd: float,
+) -> bool:
+    max_avg_entry = settings_cache.get("SNIPER_MAX_AVG_ENTRY_USD", 500.0)
+    min_mult = settings_cache.get("SNIPER_MIN_EXIT_MULTIPLIER", 3.0)
+    min_win_rate = settings_cache.get("SNIPER_MIN_WIN_RATE", 0.60)
+    min_closed = settings_cache.get("SNIPER_MIN_CLOSED_POSITIONS", 4)
+    min_net = settings_cache.get("SNIPER_MIN_NET_PROFIT_USD", 1000)
+
+    if avg_buy_size_usd is None or avg_buy_size_usd <= 0:
+        return False
+    if avg_exit_multiplier is None:
+        return False
+    closed = win_count + loss_count
+    if closed < min_closed:
+        return False
+    win_rate = (win_count / closed) if closed else 0.0
+    return (
+        avg_buy_size_usd <= max_avg_entry
+        and avg_exit_multiplier >= min_mult
+        and win_rate >= min_win_rate
+        and mints_closed >= min_closed
+        and net_profit_usd >= min_net
+    )
+
+
+def _is_dormant(last_activity_at: datetime | None) -> bool:
+    if not last_activity_at:
+        return True
+    dormant_days = settings_cache.get("WALLET_DORMANT_DAYS", 14)
+    return (datetime.utcnow() - last_activity_at) > timedelta(days=dormant_days)
+
+
 # ─── Main aggregation ──────────────────────────────────────────────────
 
 async def run_wallet_stats_aggregator():
@@ -199,6 +244,7 @@ async def run_wallet_stats_aggregator():
 
         # Upsert stats row per wallet
         new_rows = 0
+        sniper_count = 0
         for addr, mint_map in by_wallet.items():
             total_buy = sum(m["buy"] for m in mint_map.values())
             total_sell = sum(m["sell"] for m in mint_map.values())
@@ -210,21 +256,44 @@ async def run_wallet_stats_aggregator():
             win_count = 0
             loss_count = 0
             mints_closed = 0
+            exit_multipliers: list[float] = []
             for mint, v in mint_map.items():
                 profit = v["sell"] - v["buy"]
-                # Position is "closed" if they sold anything (best-effort;
-                # we don't track token balances precisely here)
                 if v["sell"] > 0:
                     mints_closed += 1
                     if profit > 0:
                         win_count += 1
                     else:
                         loss_count += 1
+                    if v["buy"] > 0:
+                        # Exit multiplier = sell proceeds / cost basis.
+                        # Cap outliers at 100x so a single degen trade
+                        # doesn't dominate the average.
+                        mult = min(v["sell"] / v["buy"], 100.0)
+                        exit_multipliers.append(mult)
                 if best_profit is None or profit > best_profit:
                     best_profit = profit
                     best_mint = mint
                 if worst_profit is None or profit < worst_profit:
                     worst_profit = profit
+
+            avg_buy_size = (
+                total_buy / buy_counts[addr] if buy_counts[addr] else None
+            )
+            avg_exit_mult = (
+                sum(exit_multipliers) / len(exit_multipliers)
+                if exit_multipliers else None
+            )
+            sniper = _compute_sniper(
+                avg_buy_size_usd=avg_buy_size,
+                avg_exit_multiplier=avg_exit_mult,
+                win_count=win_count,
+                loss_count=loss_count,
+                mints_closed=mints_closed,
+                net_profit_usd=net,
+            )
+            if sniper:
+                sniper_count += 1
 
             eid = entities.get(addr)
             esize = entity_sizes.get(eid, 1) if eid is not None else 1
@@ -255,6 +324,10 @@ async def run_wallet_stats_aggregator():
             stats.worst_mint_profit_usd = round(worst_profit, 2) if worst_profit is not None else None
             stats.win_count = win_count
             stats.loss_count = loss_count
+            stats.avg_buy_size_usd = round(avg_buy_size, 2) if avg_buy_size is not None else None
+            stats.avg_exit_multiplier = round(avg_exit_mult, 2) if avg_exit_mult is not None else None
+            stats.is_sniper = sniper
+            stats.is_dormant = _is_dormant(last_seen.get(addr))
             stats.last_activity_at = last_seen.get(addr)
             stats.confidence_score = confidence
             stats.entity_id = eid
@@ -265,13 +338,14 @@ async def run_wallet_stats_aggregator():
         total_stats = db.query(func.count(SolanaWalletStats.wallet_address)).scalar() or 0
         logger.info(
             f"wallet_stats_aggregator: upserted {len(by_wallet)} wallets "
-            f"({new_rows} new). Total rows: {total_stats}."
+            f"({new_rows} new, {sniper_count} snipers). Total rows: {total_stats}."
         )
         return {
             "wallets_with_activity": len(by_wallet),
             "new_rows": new_rows,
             "total_stats_rows": total_stats,
             "entities": len(entity_sizes),
+            "snipers": sniper_count,
         }
     finally:
         db.close()
