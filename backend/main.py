@@ -33,13 +33,22 @@ Base.metadata.create_all(bind=engine)
 
 
 def _widen_solana_sig_columns() -> None:
-    """Solana tx signatures are 87-88 chars; earlier model used
-    VARCHAR(80). Idempotent boot migration. Safe to re-run."""
+    """Solana sigs + mints don't fit BSC-era column widths. Idempotent
+    boot migration. Safe to re-run.
+
+    Critical for `alerts`: the Alert row is the dedup source-of-truth
+    for Telegram notifications. If an INSERT silently fails because a
+    Solana mint (~44 chars) doesn't fit VARCHAR(42), the same
+    convergence re-fires every cycle. Ask me how I know."""
     stmts = [
         "ALTER TABLE wallet_funding_edges "
         "ALTER COLUMN tx_hash TYPE VARCHAR(128)",
         "ALTER TABLE wallet_funding_edges "
         "ALTER COLUMN recipient_deploy_tx TYPE VARCHAR(128)",
+        "ALTER TABLE alerts "
+        "ALTER COLUMN contract_address TYPE VARCHAR(64)",
+        "ALTER TABLE alerts "
+        "ALTER COLUMN token_symbol TYPE VARCHAR(128)",
     ]
     try:
         with engine.begin() as conn:
