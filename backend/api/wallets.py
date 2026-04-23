@@ -14,16 +14,14 @@ Endpoints:
 
 import asyncio
 import math
-import time
 from datetime import datetime, timedelta
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, desc
 from sqlalchemy.orm import Session
 
-from backend.config import settings
+from backend.clients import dexscreener
 from backend.database import get_db
 from backend.models.solana_known_wallet import SolanaKnownWallet
 from backend.models.solana_wallet_activity import SolanaWalletActivity
@@ -42,44 +40,7 @@ def _short(addr: str | None) -> str | None:
     return f"{addr[:6]}…{addr[-4:]}" if len(addr) > 12 else addr
 
 
-# ─── DexScreener mint info cache (liquidity / MC) ───────────────────
-
-_DEX_CACHE: dict[str, tuple[float, dict]] = {}
-_DEX_TTL = 120.0
-
-
-async def _dexscreener_info(mint: str) -> dict | None:
-    entry = _DEX_CACHE.get(mint)
-    if entry and time.time() - entry[0] < _DEX_TTL:
-        return entry[1]
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.get(
-                f"{settings.DEXSCREENER_BASE_URL}/latest/dex/tokens/{mint}"
-            )
-            if resp.status_code != 200:
-                return None
-            pairs = (resp.json() or {}).get("pairs") or []
-            if not pairs:
-                return None
-            # Best pair by USD liquidity
-            best = max(
-                pairs,
-                key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0),
-            )
-            info = {
-                "price_usd": float(best.get("priceUsd") or 0),
-                "liquidity_usd": float(((best.get("liquidity") or {}).get("usd")) or 0),
-                "market_cap_usd": float(best.get("marketCap") or best.get("fdv") or 0),
-                "volume_24h_usd": float(((best.get("volume") or {}).get("h24")) or 0),
-                "pair_url": best.get("url"),
-                "symbol": (best.get("baseToken") or {}).get("symbol"),
-                "name": (best.get("baseToken") or {}).get("name"),
-            }
-            _DEX_CACHE[mint] = (time.time(), info)
-            return info
-    except Exception:
-        return None
+# DexScreener lookups live in backend.clients.dexscreener.token_info
 
 
 # ─── Extract from runner ─────────────────────────────────────────────
@@ -457,7 +418,7 @@ async def get_solana_convergence(
     if include_market and results:
         top = results[:15]
         mkt = await asyncio.gather(
-            *[_dexscreener_info(c["mint"]) for c in top],
+            *[dexscreener.token_info(c["mint"]) for c in top],
             return_exceptions=True,
         )
         for c, m in zip(top, mkt):
