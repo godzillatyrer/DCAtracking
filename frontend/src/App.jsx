@@ -3,6 +3,9 @@ import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import WalletTracker from './components/WalletTracker';
 import LiveActivity from './components/LiveActivity';
 import Leaderboard from './components/Leaderboard';
+import AlertHistory from './components/AlertHistory';
+import Settings from './components/Settings';
+import Health from './components/Health';
 import { colors, typography } from './theme';
 
 const navOuter = {
@@ -17,11 +20,12 @@ const navOuter = {
 
 const navInner = {
   display: 'flex',
-  gap: '28px',
+  gap: '20px',
   padding: '16px 32px',
   alignItems: 'center',
   maxWidth: '1400px',
   margin: '0 auto',
+  flexWrap: 'wrap',
 };
 
 const linkStyle = {
@@ -57,10 +61,8 @@ function App() {
               fontWeight: typography.bold,
               fontSize: '17px',
               letterSpacing: '-0.02em',
-              marginRight: '16px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
+              display: 'flex', alignItems: 'center', gap: '8px',
+              marginRight: 8,
             }}>
               <span style={{
                 width: '22px', height: '22px',
@@ -70,15 +72,12 @@ function App() {
               }} />
               Solana Cabal Tracker
             </span>
-            <NavLink to="/" end style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-              Tracker
-            </NavLink>
-            <NavLink to="/live" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-              Live Activity
-            </NavLink>
-            <NavLink to="/leaderboard" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
-              Leaderboard
-            </NavLink>
+            <NavLink to="/" end style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Tracker</NavLink>
+            <NavLink to="/live" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Live Activity</NavLink>
+            <NavLink to="/leaderboard" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Leaderboard</NavLink>
+            <NavLink to="/alerts" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Alerts</NavLink>
+            <NavLink to="/settings" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Settings</NavLink>
+            <NavLink to="/health" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Health</NavLink>
           </div>
         </nav>
         <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '40px 32px' }}>
@@ -86,6 +85,9 @@ function App() {
             <Route path="/" element={<WalletTracker />} />
             <Route path="/live" element={<LiveActivity />} />
             <Route path="/leaderboard" element={<Leaderboard />} />
+            <Route path="/alerts" element={<AlertHistory />} />
+            <Route path="/settings" element={<Settings />} />
+            <Route path="/health" element={<Health />} />
             <Route path="*" element={<WalletTracker />} />
           </Routes>
         </div>

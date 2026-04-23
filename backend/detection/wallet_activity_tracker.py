@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from backend.clients import defillama, helius
 from backend.database import SessionLocal
+from backend.models.cex_address import CexAddress
 from backend.models.solana_known_wallet import SolanaKnownWallet
 from backend.models.solana_wallet_activity import SolanaWalletActivity
 
@@ -44,10 +45,41 @@ _SKIP_MINTS = {
 }
 
 
+def _parse_sol_transfers_to_cex(tx: dict, cex_set: set[str], sender: str) -> list[dict]:
+    """Extract System::transfer instructions whose destination is a
+    known CEX deposit address. Returns a list of {recipient, amount_sol}.
+    """
+    out = []
+    try:
+        message = ((tx.get("transaction") or {}).get("message") or {})
+        for ix in message.get("instructions") or []:
+            if not isinstance(ix, dict):
+                continue
+            if (ix.get("program") or "") != "system":
+                continue
+            parsed = ix.get("parsed") or {}
+            if (parsed.get("type") or "") != "transfer":
+                continue
+            info = parsed.get("info") or {}
+            if (info.get("source") or "") != sender:
+                continue
+            dest = info.get("destination") or ""
+            if dest not in cex_set:
+                continue
+            lamports = int(info.get("lamports") or 0)
+            if lamports <= 0:
+                continue
+            out.append({
+                "recipient": dest, "sol_amount": lamports / LAMPORTS_PER_SOL,
+            })
+    except Exception:
+        pass
+    return out
+
+
 def _parse_swaps(tx: dict) -> list[dict]:
     """Return a list of (owner, mint, token_delta, sol_amount) entries
-    for every wallet whose SPL balance changed in this tx. Same per-
-    owner SOL-delta attribution as cabal_extractor."""
+    for every wallet whose SPL balance changed in this tx."""
     events = []
     try:
         message = (tx.get("transaction") or {}).get("message") or {}
@@ -116,6 +148,7 @@ async def _scan_one_wallet(
     sem: asyncio.Semaphore,
     sol_price_usd: float,
     existing_mints_by_wallet: dict[str, set[str]],
+    cex_set: set[str],
 ) -> list[SolanaWalletActivity]:
     """Pull last N signatures for one wallet, parse, return new
     activity rows (not yet committed)."""
@@ -146,6 +179,27 @@ async def _scan_one_wallet(
             datetime.utcfromtimestamp(block_time) if block_time else datetime.utcnow()
         )
         slot = int(tx.get("slot") or 0)
+
+        # CEX outflows (SOL transfers to known exchange deposit addrs)
+        if cex_set:
+            for cex_ev in _parse_sol_transfers_to_cex(tx, cex_set, wallet.wallet_address):
+                key = f"{sig}:cex:{cex_ev['recipient']}"
+                if key in seen_sigs_this_run:
+                    continue
+                seen_sigs_this_run.add(key)
+                value_usd = cex_ev["sol_amount"] * sol_price_usd if sol_price_usd else 0.0
+                new_rows.append(SolanaWalletActivity(
+                    wallet_address=wallet.wallet_address,
+                    activity_type="cex_outflow",
+                    token_mint=None,
+                    token_symbol=None,
+                    amount=Decimal(str(round(cex_ev["sol_amount"], 6))),
+                    value_usd=Decimal(str(round(value_usd, 2))),
+                    counterparty=cex_ev["recipient"],
+                    signature=sig, slot=slot,
+                    detected_at=detected,
+                    is_new_token=False, flagged=True,
+                ))
 
         for e in _parse_swaps(tx):
             if e["owner"] != wallet.wallet_address:
@@ -218,6 +272,12 @@ async def run_wallet_activity_tracker():
             .all()
         )
 
+        # Known CEX deposit addresses
+        cex_set: set[str] = {
+            r[0] for r in db.query(CexAddress.address)
+            .filter(CexAddress.is_active.is_(True)).all()
+        }
+
         # Pre-load each wallet's known mints so we can flag is_new_token.
         known_map: dict[str, set[str]] = {}
         for w in wallets:
@@ -234,7 +294,7 @@ async def run_wallet_activity_tracker():
         sem = asyncio.Semaphore(HELIUS_CONCURRENCY)
         for w in wallets:
             try:
-                new_rows = await _scan_one_wallet(w, sem, sol_price_usd, known_map)
+                new_rows = await _scan_one_wallet(w, sem, sol_price_usd, known_map, cex_set)
                 if new_rows:
                     existing_sigs = {
                         s for (s,) in db.query(SolanaWalletActivity.signature)

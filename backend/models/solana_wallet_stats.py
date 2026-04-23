@@ -56,10 +56,12 @@ class SolanaWalletStats(Base):
     loss_count = Column(Integer, default=0)
 
     # Sniper profile — small entries, high exit multiples, consistent.
-    # Populated by the aggregator.
     avg_buy_size_usd = Column(Numeric(20, 2))
     avg_exit_multiplier = Column(Numeric(10, 2))
     is_sniper = Column(Boolean, default=False)
+
+    # Decay — wallet with no new activity in WALLET_DORMANT_DAYS.
+    is_dormant = Column(Boolean, default=False)
 
     # Freshness
     last_activity_at = Column(DateTime)
@@ -77,4 +79,5 @@ class SolanaWalletStats(Base):
         Index("idx_sol_stats_confidence", confidence_score.desc()),
         Index("idx_sol_stats_entity", "entity_id"),
         Index("idx_sol_stats_sniper", "is_sniper"),
+        Index("idx_sol_stats_dormant", "is_dormant"),
     )

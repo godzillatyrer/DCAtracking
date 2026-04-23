@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import func
 
+from backend import settings_cache
 from backend.database import SessionLocal
 from backend.models.solana_known_wallet import SolanaKnownWallet
 from backend.models.solana_wallet_activity import SolanaWalletActivity
@@ -145,33 +146,39 @@ def _compute_confidence(
 # because their track record demonstrates they only enter before a
 # real pump.
 
-SNIPER_MAX_AVG_ENTRY_USD = 500.0   # "very low entries"
-SNIPER_MIN_EXIT_MULTIPLIER = 3.0   # "insane profit" floor
-SNIPER_MIN_WIN_RATE = 0.60         # consistency
-SNIPER_MIN_CLOSED_POSITIONS = 4    # anti-lucky-twice sample size
-SNIPER_MIN_NET_PROFIT_USD = 1000   # overall ROI sanity
-
-
 def _compute_sniper(
     avg_buy_size_usd: float | None, avg_exit_multiplier: float | None,
     win_count: int, loss_count: int, mints_closed: int,
     net_profit_usd: float,
 ) -> bool:
+    max_avg_entry = settings_cache.get("SNIPER_MAX_AVG_ENTRY_USD", 500.0)
+    min_mult = settings_cache.get("SNIPER_MIN_EXIT_MULTIPLIER", 3.0)
+    min_win_rate = settings_cache.get("SNIPER_MIN_WIN_RATE", 0.60)
+    min_closed = settings_cache.get("SNIPER_MIN_CLOSED_POSITIONS", 4)
+    min_net = settings_cache.get("SNIPER_MIN_NET_PROFIT_USD", 1000)
+
     if avg_buy_size_usd is None or avg_buy_size_usd <= 0:
         return False
     if avg_exit_multiplier is None:
         return False
     closed = win_count + loss_count
-    if closed < SNIPER_MIN_CLOSED_POSITIONS:
+    if closed < min_closed:
         return False
     win_rate = (win_count / closed) if closed else 0.0
     return (
-        avg_buy_size_usd <= SNIPER_MAX_AVG_ENTRY_USD
-        and avg_exit_multiplier >= SNIPER_MIN_EXIT_MULTIPLIER
-        and win_rate >= SNIPER_MIN_WIN_RATE
-        and mints_closed >= SNIPER_MIN_CLOSED_POSITIONS
-        and net_profit_usd >= SNIPER_MIN_NET_PROFIT_USD
+        avg_buy_size_usd <= max_avg_entry
+        and avg_exit_multiplier >= min_mult
+        and win_rate >= min_win_rate
+        and mints_closed >= min_closed
+        and net_profit_usd >= min_net
     )
+
+
+def _is_dormant(last_activity_at: datetime | None) -> bool:
+    if not last_activity_at:
+        return True
+    dormant_days = settings_cache.get("WALLET_DORMANT_DAYS", 14)
+    return (datetime.utcnow() - last_activity_at) > timedelta(days=dormant_days)
 
 
 # ─── Main aggregation ──────────────────────────────────────────────────
@@ -320,6 +327,7 @@ async def run_wallet_stats_aggregator():
             stats.avg_buy_size_usd = round(avg_buy_size, 2) if avg_buy_size is not None else None
             stats.avg_exit_multiplier = round(avg_exit_mult, 2) if avg_exit_mult is not None else None
             stats.is_sniper = sniper
+            stats.is_dormant = _is_dormant(last_seen.get(addr))
             stats.last_activity_at = last_seen.get(addr)
             stats.confidence_score = confidence
             stats.entity_id = eid

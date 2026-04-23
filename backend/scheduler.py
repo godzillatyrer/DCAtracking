@@ -15,6 +15,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.database import SessionLocal
 from backend.detection.alert_dispatcher import run_alert_dispatch
+from backend.detection.alert_outcome_tracker import run_alert_outcome_tracker
+from backend.detection.behavioral_clusterer import run_behavioral_clusterer
 from backend.detection.solana_graph_walk import run_solana_graph_walk
 from backend.detection.wallet_activity_tracker import run_wallet_activity_tracker
 from backend.detection.wallet_stats_aggregator import run_wallet_stats_aggregator
@@ -119,6 +121,32 @@ async def run_wallet_stats_aggregator_job():
                  started_at=started, finished_at=datetime.utcnow())
 
 
+async def run_alert_outcome_tracker_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_alert_outcome_tracker()
+        log_scan("alert_outcome_tracker", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"alert_outcome_tracker failed: {e}")
+        log_scan("alert_outcome_tracker", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
+async def run_behavioral_clusterer_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_behavioral_clusterer()
+        log_scan("behavioral_clusterer", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"behavioral_clusterer failed: {e}")
+        log_scan("behavioral_clusterer", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
 def setup_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(job_defaults={
         "max_instances": 1,
@@ -147,6 +175,19 @@ def setup_scheduler() -> AsyncIOScheduler:
         id="wallet_stats_aggregator", name="Wallet Stats Aggregator",
         minutes=10,
         next_run_time=now + timedelta(minutes=1),
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_alert_outcome_tracker_job, "alert_outcome_tracker"),
+        "interval",
+        id="alert_outcome_tracker", name="Alert Outcome Tracker",
+        minutes=10,
+        next_run_time=now + timedelta(minutes=2),
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_behavioral_clusterer_job, "behavioral_clusterer"),
+        "cron",
+        id="behavioral_clusterer", name="Behavioral Clusterer",
+        hour=3, minute=15,   # 03:15 UTC nightly
     )
 
     return scheduler
