@@ -1,6 +1,7 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import WalletTracker from './components/WalletTracker';
+import LiveActivity from './components/LiveActivity';
 import { colors, typography } from './theme';
 
 const navOuter = {
@@ -22,6 +23,23 @@ const navInner = {
   margin: '0 auto',
 };
 
+const linkStyle = {
+  color: colors.textFaint,
+  textDecoration: 'none',
+  fontSize: '14px',
+  fontWeight: typography.medium,
+  padding: '8px 14px',
+  borderRadius: '8px',
+  transition: 'color 0.15s, background 0.15s',
+};
+
+const activeLinkStyle = {
+  ...linkStyle,
+  color: colors.text,
+  background: '#f0f0f3',
+  fontWeight: typography.semibold,
+};
+
 function App() {
   return (
     <BrowserRouter>
@@ -38,6 +56,7 @@ function App() {
               fontWeight: typography.bold,
               fontSize: '17px',
               letterSpacing: '-0.02em',
+              marginRight: '16px',
               display: 'flex',
               alignItems: 'center',
               gap: '8px',
@@ -50,11 +69,18 @@ function App() {
               }} />
               Solana Cabal Tracker
             </span>
+            <NavLink to="/" end style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+              Tracker
+            </NavLink>
+            <NavLink to="/live" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+              Live Activity
+            </NavLink>
           </div>
         </nav>
         <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '40px 32px' }}>
           <Routes>
             <Route path="/" element={<WalletTracker />} />
+            <Route path="/live" element={<LiveActivity />} />
             <Route path="*" element={<WalletTracker />} />
           </Routes>
         </div>
