@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from backend.alerts.telegram_bot import fire_cabal_alert
+from backend.alerts.telegram_bot import fire_cabal_alert, fire_sniper_solo_alert
 from backend.clients import dexscreener
 from backend.database import SessionLocal
 from backend.models.alert import Alert
@@ -59,13 +59,19 @@ ALLOW_MISSING_MARKET = True
 # Per-mint dedup retention
 _DEDUP_HOURS = 24
 
-# Global hourly cap — if 6 different convergences happen in the same
-# hour, only the top 5 by wallet count / score get pushed. Prevents
-# "channel explodes on a market-wide pump" behavior.
+# Global hourly cap for convergence alerts
 MAX_ALERTS_PER_HOUR = 5
 
-# Solo alerts are OFF by default at the user's request.
-SOLO_ALERTS_ENABLED = False
+# Sniper-solo alerts: ONE top-tier sniper (is_sniper=True) buying a
+# mint they've never held, under the MC ceiling. Low entries + high
+# exit multiples = strong enough signal to fire on one wallet.
+SOLO_ALERTS_ENABLED = True
+# Separate (lower) cap for sniper alerts — they can be frequent if
+# several snipers become active in the same window.
+SOLO_MAX_ALERTS_PER_HOUR = 3
+# MC ceiling for sniper alerts. Looser than convergence since a good
+# sniper often buys right at migration (50-150k). Tune if needed.
+SOLO_MAX_MC_USD = 150_000.0
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────
@@ -83,12 +89,12 @@ def _recently_alerted_mints(db: Session, alert_type: str) -> set[str]:
     }
 
 
-def _alerts_sent_last_hour(db: Session) -> int:
+def _alerts_sent_last_hour(db: Session, alert_type: str) -> int:
     cutoff = datetime.utcnow() - timedelta(hours=1)
     return (
         db.query(func.count(Alert.id))
         .filter(
-            Alert.alert_type == "cabal_convergence",
+            Alert.alert_type == alert_type,
             Alert.fired_at >= cutoff,
         )
         .scalar()
@@ -191,78 +197,183 @@ def _gather_candidates(db: Session, since: datetime) -> list[dict]:
 
 # ─── Market-cap gate ─────────────────────────────────────────────────
 
-async def _check_mc(mint: str) -> tuple[bool, dict | None]:
-    """Return (passes_filter, market_info)."""
+async def _check_mc(mint: str, ceiling: float) -> tuple[bool, dict | None]:
+    """Return (passes_filter, market_info). Missing data → passes."""
     mkt = await dexscreener.token_info(mint)
     if not mkt:
         return (ALLOW_MISSING_MARKET, None)
     mc = mkt.get("market_cap_usd") or 0
     if mc == 0:
-        # Missing/zero MC → treat as "fresh, no pair data yet"
         return (ALLOW_MISSING_MARKET, mkt)
-    return (mc < FRESH_MAX_MC_USD, mkt)
+    return (mc < ceiling, mkt)
+
+
+# ─── Sniper-solo candidates ────────────────────────────────────────────
+
+def _gather_sniper_candidates(db: Session, since: datetime) -> list[dict]:
+    """Buys by is_sniper wallets on mints they've never held before,
+    in the window. One row per (wallet, mint) — we only alert on the
+    first buy within the cycle even if the wallet bought multiple
+    times in the same tx batch."""
+    rows = (
+        db.query(
+            SolanaWalletActivity.wallet_address,
+            SolanaWalletActivity.token_mint,
+            SolanaWalletActivity.value_usd,
+            SolanaWalletActivity.detected_at,
+            SolanaKnownWallet.role,
+            SolanaWalletStats.confidence_score,
+            SolanaWalletStats.avg_buy_size_usd,
+            SolanaWalletStats.avg_exit_multiplier,
+            SolanaWalletStats.best_mint_profit_usd,
+            SolanaWalletStats.win_count,
+            SolanaWalletStats.loss_count,
+            SolanaWalletStats.net_profit_usd,
+            SolanaWalletStats.mints_closed,
+        )
+        .outerjoin(
+            SolanaKnownWallet,
+            SolanaKnownWallet.wallet_address == SolanaWalletActivity.wallet_address,
+        )
+        .join(
+            SolanaWalletStats,
+            SolanaWalletStats.wallet_address == SolanaWalletActivity.wallet_address,
+        )
+        .filter(
+            SolanaWalletActivity.activity_type == "spl_buy",
+            SolanaWalletActivity.is_new_token.is_(True),
+            SolanaWalletActivity.detected_at >= since,
+            SolanaWalletStats.is_sniper.is_(True),
+        )
+        .order_by(SolanaWalletActivity.detected_at.desc())
+        .all()
+    )
+    # Collapse by (wallet, mint) — earliest buy wins
+    seen = set()
+    out = []
+    for (addr, mint, val, detected, role, conf, avg_buy, avg_mult,
+         best_profit, wins, losses, net_profit, mints_closed) in rows:
+        key = (addr, mint)
+        if key in seen:
+            continue
+        seen.add(key)
+        closed = (wins or 0) + (losses or 0)
+        out.append({
+            "wallet": addr,
+            "mint": mint,
+            "value_usd": float(val or 0),
+            "detected_at": detected,
+            "role": role,
+            "confidence": float(conf or 0),
+            "avg_buy_size_usd": float(avg_buy or 0),
+            "avg_exit_multiplier": float(avg_mult or 0),
+            "best_mint_profit_usd": float(best_profit or 0),
+            "win_count": wins or 0,
+            "loss_count": losses or 0,
+            "win_rate": (wins / closed) if closed else 0.0,
+            "net_profit_usd": float(net_profit or 0),
+            "mints_closed": mints_closed or 0,
+        })
+    # Best signal first: highest confidence, then highest avg exit mult
+    out.sort(key=lambda e: (-e["confidence"], -e["avg_exit_multiplier"]))
+    return out
 
 
 # ─── Entry point ──────────────────────────────────────────────────────
+
+async def _dispatch_convergence(db: Session, since: datetime) -> int:
+    already = _recently_alerted_mints(db, "cabal_convergence")
+    hour_budget = max(0, MAX_ALERTS_PER_HOUR - _alerts_sent_last_hour(db, "cabal_convergence"))
+    if hour_budget == 0:
+        logger.info(
+            f"alert_dispatch: convergence hourly cap reached ({MAX_ALERTS_PER_HOUR})"
+        )
+        return 0
+
+    fired = 0
+    for cluster in _gather_candidates(db, since):
+        if fired >= hour_budget:
+            break
+        mint = cluster["mint"]
+        if mint in already:
+            continue
+
+        passes, mkt = await _check_mc(mint, FRESH_MAX_MC_USD)
+        if not passes:
+            logger.info(
+                f"alert_dispatch: skipped convergence {mint[:10]} — MC "
+                f"{mkt.get('market_cap_usd') if mkt else 'unknown'} "
+                f"above {FRESH_MAX_MC_USD:,.0f}"
+            )
+            continue
+
+        event = {
+            "mint": mint,
+            "symbol": (mkt or {}).get("symbol"),
+            "name": (mkt or {}).get("name"),
+            "market": mkt or {},
+            "wallets": cluster["wallets"],
+            "cabal_count": cluster["dominant_entity_count"],
+            "entity_count": cluster["distinct_entities"],
+            "trigger_reason": (
+                f"{cluster['dominant_entity_count']} wallets from the same "
+                f"funder cluster bought in the last {CONVERGENCE_WINDOW_MIN}m. "
+                f"Total buyers: {cluster['wallet_count']}."
+            ),
+        }
+        if await fire_cabal_alert(event, db=db):
+            fired += 1
+            already.add(mint)
+    return fired
+
+
+async def _dispatch_sniper_solo(db: Session, since: datetime) -> int:
+    if not SOLO_ALERTS_ENABLED:
+        return 0
+    already = _recently_alerted_mints(db, "sniper_solo")
+    hour_budget = max(
+        0, SOLO_MAX_ALERTS_PER_HOUR - _alerts_sent_last_hour(db, "sniper_solo")
+    )
+    if hour_budget == 0:
+        logger.info(
+            f"alert_dispatch: sniper hourly cap reached ({SOLO_MAX_ALERTS_PER_HOUR})"
+        )
+        return 0
+
+    fired = 0
+    for event in _gather_sniper_candidates(db, since):
+        if fired >= hour_budget:
+            break
+        mint = event["mint"]
+        if mint in already:
+            continue
+        passes, mkt = await _check_mc(mint, SOLO_MAX_MC_USD)
+        if not passes:
+            continue
+        event["market"] = mkt or {}
+        event["symbol"] = (mkt or {}).get("symbol")
+        event["name"] = (mkt or {}).get("name")
+        if await fire_sniper_solo_alert(event, db=db):
+            fired += 1
+            already.add(mint)
+    return fired
+
 
 async def run_alert_dispatch():
     """Called after each activity tracker run."""
     db = SessionLocal()
     try:
-        # Per-mint dedup + global hour-cap
-        already = _recently_alerted_mints(db, "cabal_convergence")
-        hour_budget = max(0, MAX_ALERTS_PER_HOUR - _alerts_sent_last_hour(db))
-        if hour_budget == 0:
-            logger.info(
-                f"alert_dispatch: hourly cap reached ({MAX_ALERTS_PER_HOUR}) — skipping"
-            )
-            return {"convergence_fired": 0, "hour_cap_reached": True}
-
         since = datetime.utcnow() - timedelta(minutes=CONVERGENCE_WINDOW_MIN)
-        candidates = _gather_candidates(db, since)
-        fired = 0
-
-        for cluster in candidates:
-            if fired >= hour_budget:
-                break
-            mint = cluster["mint"]
-            if mint in already:
-                continue
-
-            passes, mkt = await _check_mc(mint)
-            if not passes:
-                logger.info(
-                    f"alert_dispatch: skipped {mint[:10]} — MC "
-                    f"{mkt.get('market_cap_usd') if mkt else 'unknown'} "
-                    f"above {FRESH_MAX_MC_USD:,.0f} threshold"
-                )
-                continue
-
-            event = {
-                "mint": mint,
-                "symbol": (mkt or {}).get("symbol"),
-                "name": (mkt or {}).get("name"),
-                "market": mkt or {},
-                "wallets": cluster["wallets"],
-                "cabal_count": cluster["dominant_entity_count"],
-                "entity_count": cluster["distinct_entities"],
-                "trigger_reason": (
-                    f"{cluster['dominant_entity_count']} wallets from the same "
-                    f"funder cluster bought in the last {CONVERGENCE_WINDOW_MIN}m. "
-                    f"Total buyers: {cluster['wallet_count']}."
-                ),
-            }
-            ok = await fire_cabal_alert(event, db=db)
-            if ok:
-                fired += 1
-                already.add(mint)
-
-        if fired:
-            logger.info(f"alert_dispatch: fired {fired} convergence alerts")
+        convergence_fired = await _dispatch_convergence(db, since)
+        sniper_fired = await _dispatch_sniper_solo(db, since)
+        if convergence_fired or sniper_fired:
+            logger.info(
+                f"alert_dispatch: {convergence_fired} convergence + "
+                f"{sniper_fired} sniper solo alerts fired"
+            )
         return {
-            "convergence_fired": fired,
-            "candidates": len(candidates),
-            "hour_budget_remaining": max(0, hour_budget - fired),
+            "convergence_fired": convergence_fired,
+            "sniper_fired": sniper_fired,
             "solo_enabled": SOLO_ALERTS_ENABLED,
         }
     finally:

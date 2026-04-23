@@ -49,6 +49,14 @@ def _widen_solana_sig_columns() -> None:
         "ALTER COLUMN contract_address TYPE VARCHAR(64)",
         "ALTER TABLE alerts "
         "ALTER COLUMN token_symbol TYPE VARCHAR(128)",
+        # Sniper profile columns (added post-launch). Postgres supports
+        # IF NOT EXISTS so this is safe to re-run on every boot.
+        "ALTER TABLE solana_wallet_stats "
+        "ADD COLUMN IF NOT EXISTS avg_buy_size_usd NUMERIC(20, 2)",
+        "ALTER TABLE solana_wallet_stats "
+        "ADD COLUMN IF NOT EXISTS avg_exit_multiplier NUMERIC(10, 2)",
+        "ALTER TABLE solana_wallet_stats "
+        "ADD COLUMN IF NOT EXISTS is_sniper BOOLEAN DEFAULT FALSE",
     ]
     try:
         with engine.begin() as conn:

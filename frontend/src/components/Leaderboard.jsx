@@ -68,8 +68,9 @@ function fmtUsd(v) {
 
 function Leaderboard() {
   const [minConfidence, setMinConfidence] = useState(0);
+  const [snipersOnly, setSnipersOnly] = useState(false);
   const { data, loading } = useApi(
-    `/wallets/solana/leaderboard?limit=100&min_confidence=${minConfidence}`,
+    `/wallets/solana/leaderboard?limit=100&min_confidence=${minConfidence}&snipers_only=${snipersOnly}`,
     { refreshInterval: 60000 }
   );
   const items = data?.items || [];
@@ -107,6 +108,20 @@ function Leaderboard() {
             }}
           >{n === 0 ? 'All' : `${n}+`}</button>
         ))}
+        <button
+          onClick={() => setSnipersOnly(!snipersOnly)}
+          style={{
+            marginLeft: spacing.md,
+            background: snipersOnly ? colors.success : 'transparent',
+            color: snipersOnly ? '#fff' : colors.textDim,
+            border: `1px solid ${snipersOnly ? colors.success : colors.borderStrong}`,
+            padding: '6px 12px',
+            borderRadius: radius.sm,
+            fontSize: typography.small,
+            fontWeight: typography.medium,
+            cursor: 'pointer',
+          }}
+        >🎯 Snipers only</button>
         <span style={{
           marginLeft: 'auto',
           color: colors.textFaint,
@@ -150,9 +165,24 @@ function Leaderboard() {
                   <tr key={w.wallet_address}>
                     <td style={{ ...td, color: colors.textFaint }}>{i + 1}</td>
                     <td style={td}>
-                      <SolscanLink address={w.wallet_address}>
-                        {w.wallet_short}
-                      </SolscanLink>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <SolscanLink address={w.wallet_address}>
+                          {w.wallet_short}
+                        </SolscanLink>
+                        {w.is_sniper && (
+                          <span title={`Sniper — avg $${(w.avg_buy_size_usd || 0).toFixed(0)} entry, ${(w.avg_exit_multiplier || 0).toFixed(1)}x avg exit`}
+                                style={{
+                                  background: colors.successSoft,
+                                  color: colors.success,
+                                  borderRadius: radius.pill,
+                                  padding: '2px 6px',
+                                  fontSize: 10,
+                                  fontWeight: typography.semibold,
+                                }}>
+                            🎯 SNIPER
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td style={td}>
                       {w.role ? (

@@ -169,17 +169,24 @@ def get_solana_known_wallets(
 def get_leaderboard(
     limit: int = Query(50, ge=1, le=200),
     min_confidence: float = Query(0.0, ge=0.0),
+    snipers_only: bool = Query(False),
     db: Session = Depends(get_db),
 ):
-    """Top wallets by composite confidence score."""
-    rows = (
+    """Top wallets by composite confidence score. Set snipers_only=true
+    to restrict to wallets meeting the sniper profile (low avg entry,
+    high exit multiples, consistent win rate)."""
+    query = (
         db.query(SolanaWalletStats, SolanaKnownWallet)
         .outerjoin(
             SolanaKnownWallet,
             SolanaKnownWallet.wallet_address == SolanaWalletStats.wallet_address,
         )
         .filter(SolanaWalletStats.confidence_score >= min_confidence)
-        .order_by(desc(SolanaWalletStats.confidence_score))
+    )
+    if snipers_only:
+        query = query.filter(SolanaWalletStats.is_sniper.is_(True))
+    rows = (
+        query.order_by(desc(SolanaWalletStats.confidence_score))
         .limit(limit)
         .all()
     )
@@ -203,6 +210,9 @@ def get_leaderboard(
             "best_mint": s.best_mint,
             "best_mint_short": _short(s.best_mint),
             "best_mint_profit_usd": float(s.best_mint_profit_usd) if s.best_mint_profit_usd is not None else None,
+            "avg_buy_size_usd": float(s.avg_buy_size_usd) if s.avg_buy_size_usd is not None else None,
+            "avg_exit_multiplier": float(s.avg_exit_multiplier) if s.avg_exit_multiplier is not None else None,
+            "is_sniper": bool(s.is_sniper),
             "last_activity_at": s.last_activity_at.isoformat() if s.last_activity_at else None,
             "entity_id": s.entity_id,
             "entity_size": s.entity_size or 1,
