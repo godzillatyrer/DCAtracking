@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import WalletTracker from './components/WalletTracker';
 import LiveActivity from './components/LiveActivity';
+import Leaderboard from './components/Leaderboard';
 import { colors, typography } from './theme';
 
 const navOuter = {
@@ -75,12 +76,16 @@ function App() {
             <NavLink to="/live" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
               Live Activity
             </NavLink>
+            <NavLink to="/leaderboard" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>
+              Leaderboard
+            </NavLink>
           </div>
         </nav>
         <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '40px 32px' }}>
           <Routes>
             <Route path="/" element={<WalletTracker />} />
             <Route path="/live" element={<LiveActivity />} />
+            <Route path="/leaderboard" element={<Leaderboard />} />
             <Route path="*" element={<WalletTracker />} />
           </Routes>
         </div>

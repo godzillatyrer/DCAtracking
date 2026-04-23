@@ -256,15 +256,10 @@ function CabalExtractor({ onSuccess }) {
 }
 
 function TrackedRow({ w }) {
-  // Adaptive "origin" cell — tells you where this wallet came from
-  // without forcing every row into one shape.
   const origin = (() => {
     if (w.associated_token) {
       return (
-        <span style={{
-          color: colors.text,
-          fontWeight: typography.medium,
-        }}>
+        <span style={{ color: colors.text, fontWeight: typography.medium }}>
           {w.associated_token}
         </span>
       );
@@ -292,6 +287,13 @@ function TrackedRow({ w }) {
     return <span style={{ color: colors.textMuted }}>—</span>;
   })();
 
+  const conf = w.confidence_score;
+  const confColor =
+    conf == null ? colors.textMuted :
+    conf >= 10 ? colors.success :
+    conf >= 5 ? colors.accent :
+    conf >= 2 ? colors.warning : colors.textFaint;
+
   return (
     <tr>
       <td style={td}>
@@ -302,11 +304,16 @@ function TrackedRow({ w }) {
       <td style={td}>
         <span style={pill(roleVariant(w.role))}>{w.role}</span>
       </td>
+      <td style={{ ...td, fontFamily: typography.mono, color: confColor }}>
+        {conf == null ? '—' : `★${Number(conf).toFixed(1)}`}
+      </td>
       <td style={{ ...td, fontSize: typography.small }}>{origin}</td>
-      <td style={{ ...td, fontFamily: typography.mono, color: w.total_profit_est ? colors.success : colors.textMuted }}>
-        {w.total_profit_est
-          ? `$${Number(w.total_profit_est).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-          : '—'}
+      <td style={{ ...td, fontFamily: typography.mono, color: (w.net_profit_usd ?? 0) >= 0 ? colors.success : colors.danger }}>
+        {w.net_profit_usd != null
+          ? `${w.net_profit_usd >= 0 ? '+' : ''}$${Number(w.net_profit_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+          : (w.total_profit_est
+              ? `$${Number(w.total_profit_est).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+              : '—')}
       </td>
       <td style={{ ...td, color: colors.textFaint, fontSize: typography.small }}>
         {formatDate(w.added_at)}
@@ -395,8 +402,9 @@ function WalletTracker() {
                 <tr>
                   <th style={th}>Wallet</th>
                   <th style={th}>Role</th>
+                  <th style={th}>Confidence</th>
                   <th style={th}>Origin</th>
-                  <th style={th}>Profit (est.)</th>
+                  <th style={th}>Net P/L</th>
                   <th style={th}>Added</th>
                 </tr>
               </thead>

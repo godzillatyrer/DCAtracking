@@ -7,18 +7,12 @@ import {
   th, td, pill,
 } from '../theme';
 
-function short(addr) {
-  if (!addr) return null;
-  return addr.length > 12 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
-}
-
 function SolscanLink({ address, children }) {
   if (!address) return children;
   return (
     <a
       href={`https://solscan.io/account/${address}`}
-      target="_blank"
-      rel="noreferrer"
+      target="_blank" rel="noreferrer"
       style={{
         color: colors.accent,
         textDecoration: 'none',
@@ -42,6 +36,13 @@ function roleVariant(role) {
   }
 }
 
+function fmtUsd(v, digits = 0) {
+  const n = Number(v) || 0;
+  if (Math.abs(n) >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+  if (Math.abs(n) >= 1_000) return `$${(n / 1_000).toFixed(1)}k`;
+  return `$${n.toFixed(digits)}`;
+}
+
 function Section({ title, subtitle, children, accent = false }) {
   return (
     <div style={{
@@ -55,10 +56,7 @@ function Section({ title, subtitle, children, accent = false }) {
         padding: `${spacing.md} ${spacing.lg}`,
         borderBottom: children ? `1px solid ${colors.border}` : 'none',
       }}>
-        <div style={{
-          ...sectionTitle,
-          marginBottom: subtitle ? spacing.xs : 0,
-        }}>
+        <div style={{ ...sectionTitle, marginBottom: subtitle ? spacing.xs : 0 }}>
           {title}
         </div>
         {subtitle && (
@@ -73,71 +71,106 @@ function Section({ title, subtitle, children, accent = false }) {
 }
 
 function confidenceLabel(score) {
-  if (score >= 3.0) return { text: 'HIGH', color: colors.success };
-  if (score >= 2.0) return { text: 'MEDIUM', color: colors.warning };
+  if (score >= 4.0) return { text: 'HIGH', color: colors.success };
+  if (score >= 2.5) return { text: 'MEDIUM', color: colors.warning };
   return { text: 'LOW', color: colors.textFaint };
 }
 
 function ConvergenceCard({ cluster }) {
   const { text: confText, color: confColor } = confidenceLabel(cluster.score);
+  const mkt = cluster.market;
+  const symbol = cluster.symbol || mkt?.symbol;
+
   return (
     <div style={{
       padding: `${spacing.md} ${spacing.lg}`,
       borderBottom: `1px solid ${colors.border}`,
     }}>
+      {/* Header row */}
       <div style={{
-        display: 'flex',
-        alignItems: 'baseline',
-        gap: spacing.md,
-        marginBottom: spacing.sm,
+        display: 'flex', alignItems: 'baseline', gap: spacing.md,
+        flexWrap: 'wrap', marginBottom: spacing.sm,
       }}>
         <div style={{
           fontSize: typography.h3,
           fontWeight: typography.semibold,
           fontFamily: typography.mono,
+          minWidth: 120,
         }}>
+          {symbol && (
+            <span style={{ color: colors.text, fontFamily: typography.sans, marginRight: 8 }}>
+              {symbol}
+            </span>
+          )}
           <SolscanLink address={cluster.mint}>{cluster.mint_short}</SolscanLink>
         </div>
         <div style={{
-          ...pill('accent'),
+          display: 'inline-block',
+          padding: '4px 10px',
+          borderRadius: radius.pill,
+          fontSize: typography.tiny,
+          fontWeight: typography.semibold,
           background: `${confColor}20`,
           color: confColor,
+          letterSpacing: 0.3,
+          textTransform: 'uppercase',
         }}>
           {confText} · score {cluster.score}
         </div>
         <div style={{ color: colors.textFaint, fontSize: typography.small }}>
-          {cluster.wallet_count} wallets · ${cluster.total_value_usd?.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          {cluster.wallet_count} wallets
+          {cluster.distinct_entities !== cluster.wallet_count && (
+            <> · <span title="Distinct funder clusters (anti-Sybil)">
+              {cluster.distinct_entities} entities
+            </span></>
+          )}
+          {' · '}buys totaling {fmtUsd(cluster.total_value_usd)}
+          {' · tightness '}{cluster.time_tightness}
         </div>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: spacing.sm }}>
-          <a
-            href={`https://dexscreener.com/solana/${cluster.mint}`}
-            target="_blank" rel="noreferrer"
-            style={{
-              color: colors.accent,
-              fontSize: typography.small,
-              textDecoration: 'none',
-              fontWeight: typography.medium,
-            }}
-          >DEX Screener</a>
-          <a
-            href={`https://gmgn.ai/sol/token/${cluster.mint}`}
-            target="_blank" rel="noreferrer"
-            style={{
-              color: colors.accent,
-              fontSize: typography.small,
-              textDecoration: 'none',
-              fontWeight: typography.medium,
-            }}
-          >GMGN</a>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: spacing.md }}>
+          <a href={`https://dexscreener.com/solana/${cluster.mint}`}
+             target="_blank" rel="noreferrer"
+             style={{ color: colors.accent, fontSize: typography.small, textDecoration: 'none', fontWeight: typography.medium }}>
+            DEX Screener
+          </a>
+          <a href={`https://gmgn.ai/sol/token/${cluster.mint}`}
+             target="_blank" rel="noreferrer"
+             style={{ color: colors.accent, fontSize: typography.small, textDecoration: 'none', fontWeight: typography.medium }}>
+            GMGN
+          </a>
         </div>
       </div>
+
+      {/* Market info if available */}
+      {mkt && (
+        <div style={{
+          display: 'flex', gap: spacing.lg, flexWrap: 'wrap',
+          fontSize: typography.small, color: colors.textDim,
+          marginBottom: spacing.sm,
+        }}>
+          {mkt.price_usd > 0 && (
+            <span><b style={{ color: colors.text }}>Price</b> ${mkt.price_usd.toLocaleString(undefined, { maximumSignificantDigits: 3 })}</span>
+          )}
+          {mkt.market_cap_usd > 0 && (
+            <span><b style={{ color: colors.text }}>MC</b> {fmtUsd(mkt.market_cap_usd)}</span>
+          )}
+          {mkt.liquidity_usd > 0 && (
+            <span><b style={{ color: colors.text }}>Liq</b> {fmtUsd(mkt.liquidity_usd)}</span>
+          )}
+          {mkt.volume_24h_usd > 0 && (
+            <span><b style={{ color: colors.text }}>Vol 24h</b> {fmtUsd(mkt.volume_24h_usd)}</span>
+          )}
+        </div>
+      )}
+
+      {/* Wallet chips */}
       <div style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: spacing.xs,
+        display: 'flex', flexWrap: 'wrap', gap: spacing.xs,
         marginTop: spacing.sm,
       }}>
-        {cluster.wallets.map(w => (
+        {cluster.wallets
+          .sort((a, b) => b.weight - a.weight)
+          .map(w => (
           <div key={w.wallet_address} style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -152,9 +185,20 @@ function ConvergenceCard({ cluster }) {
               {w.role?.replace('cabal_', '') || 'unknown'}
             </span>
             <SolscanLink address={w.wallet_address}>{w.wallet_short}</SolscanLink>
+            {w.confidence_score > 0 && (
+              <span
+                title={`Confidence ${w.confidence_score.toFixed(1)}`}
+                style={{
+                  color: w.confidence_score >= 5 ? colors.success : colors.textFaint,
+                  fontFamily: typography.mono,
+                }}
+              >
+                ★{w.confidence_score.toFixed(1)}
+              </span>
+            )}
             {w.value_usd > 0 && (
               <span style={{ color: colors.textFaint, fontFamily: typography.mono }}>
-                ${w.value_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                {fmtUsd(w.value_usd)}
               </span>
             )}
           </div>
@@ -168,19 +212,11 @@ function ConvergenceCard({ cluster }) {
 }
 
 function WindowSelector({ value, onChange }) {
-  const options = [
-    [30, '30m'],
-    [60, '1h'],
-    [180, '3h'],
-    [360, '6h'],
-    [1440, '24h'],
-  ];
+  const options = [[30, '30m'], [60, '1h'], [180, '3h'], [360, '6h'], [1440, '24h']];
   return (
     <div style={{ display: 'flex', gap: spacing.xs }}>
       {options.map(([v, label]) => (
-        <button
-          key={v}
-          onClick={() => onChange(v)}
+        <button key={v} onClick={() => onChange(v)}
           style={{
             background: value === v ? colors.accent : 'transparent',
             color: value === v ? '#fff' : colors.textDim,
@@ -191,9 +227,7 @@ function WindowSelector({ value, onChange }) {
             fontWeight: typography.medium,
             cursor: 'pointer',
           }}
-        >
-          {label}
-        </button>
+        >{label}</button>
       ))}
     </div>
   );
@@ -219,17 +253,14 @@ function LiveActivity() {
     <div>
       <h1 style={pageTitle}>Live Activity</h1>
       <div style={pageSubtitle}>
-        Real-time view of what tracked cabal wallets are buying. When
-        multiple wallets converge on the same new mint, the cluster
-        score rises — those are your highest-conviction signals.
+        Real-time view of what tracked cabal wallets are buying. Score =
+        Σ(role × confidence / √entity_size) × time-tightness. Telegram
+        alerts fire automatically on score ≥ 2.0.
       </div>
 
       <div style={{
-        display: 'flex',
-        gap: spacing.lg,
-        alignItems: 'center',
-        marginBottom: spacing.lg,
-        flexWrap: 'wrap',
+        display: 'flex', gap: spacing.lg, alignItems: 'center',
+        marginBottom: spacing.lg, flexWrap: 'wrap',
       }}>
         <div>
           <div style={{ fontSize: typography.tiny, color: colors.textFaint, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
@@ -243,9 +274,7 @@ function LiveActivity() {
           </div>
           <div style={{ display: 'flex', gap: spacing.xs }}>
             {[2, 3, 5].map(n => (
-              <button
-                key={n}
-                onClick={() => setMinWallets(n)}
+              <button key={n} onClick={() => setMinWallets(n)}
                 style={{
                   background: minWallets === n ? colors.accent : 'transparent',
                   color: minWallets === n ? '#fff' : colors.textDim,
@@ -265,7 +294,7 @@ function LiveActivity() {
 
       <Section
         title="Convergence"
-        subtitle={`Mints bought by ${minWallets}+ tracked wallets in the last ${window < 60 ? `${window}m` : `${Math.round(window / 60)}h`}. Score weights by role (trader 1.0, linked 0.7, depth-2 0.5).`}
+        subtitle={`Mints bought by ${minWallets}+ tracked wallets in the last ${window < 60 ? `${window}m` : `${Math.round(window / 60)}h`}. Score weights by role, stats confidence, and funder cluster size. Telegram alerts on score ≥ 2.0.`}
         accent={clusters.length > 0}
       >
         {convLoading && clusters.length === 0 ? (
@@ -274,9 +303,7 @@ function LiveActivity() {
           </div>
         ) : clusters.length === 0 ? (
           <div style={{ padding: '48px 16px', textAlign: 'center', color: colors.textFaint }}>
-            No convergence yet. Tracker polls every 5 min — either no
-            tracked wallets are buying anything, or not enough have
-            converged on the same mint in this window.
+            No convergence yet. Tracker polls every 5 min.
           </div>
         ) : (
           clusters.map(c => <ConvergenceCard key={c.mint} cluster={c} />)
@@ -289,7 +316,7 @@ function LiveActivity() {
       >
         {activity.length === 0 ? (
           <div style={{ padding: '48px 16px', textAlign: 'center', color: colors.textFaint }}>
-            No activity in this window yet. Wait for the next tracker run.
+            No activity in this window yet.
           </div>
         ) : (
           <div style={{ maxHeight: 560, overflowY: 'auto' }}>
@@ -298,6 +325,7 @@ function LiveActivity() {
                 <tr>
                   <th style={th}>Wallet</th>
                   <th style={th}>Role</th>
+                  <th style={th}>Confidence</th>
                   <th style={th}>Mint</th>
                   <th style={th}>Value</th>
                   <th style={th}>New?</th>
@@ -314,25 +342,20 @@ function LiveActivity() {
                     </td>
                     <td style={td}>
                       {a.wallet_role ? (
-                        <span style={pill(roleVariant(a.wallet_role))}>
-                          {a.wallet_role}
-                        </span>
+                        <span style={pill(roleVariant(a.wallet_role))}>{a.wallet_role}</span>
                       ) : '—'}
                     </td>
+                    <td style={{ ...td, fontFamily: typography.mono, color: a.wallet_confidence >= 5 ? colors.success : colors.textDim, fontSize: typography.small }}>
+                      {a.wallet_confidence != null ? `★${Number(a.wallet_confidence).toFixed(1)}` : '—'}
+                    </td>
                     <td style={td}>
-                      <SolscanLink address={a.token_mint}>
-                        {a.token_mint_short}
-                      </SolscanLink>
+                      <SolscanLink address={a.token_mint}>{a.token_mint_short}</SolscanLink>
                     </td>
                     <td style={{ ...td, fontFamily: typography.mono, color: colors.textDim }}>
-                      {a.value_usd && Number(a.value_usd) > 0
-                        ? `$${Number(a.value_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-                        : '—'}
+                      {a.value_usd && Number(a.value_usd) > 0 ? fmtUsd(a.value_usd) : '—'}
                     </td>
                     <td style={td}>
-                      {a.is_new_token ? (
-                        <span style={pill('success')}>NEW</span>
-                      ) : null}
+                      {a.is_new_token ? <span style={pill('success')}>NEW</span> : null}
                     </td>
                     <td style={{ ...td, color: colors.textFaint, fontSize: typography.small }}>
                       {formatDate(a.detected_at)}

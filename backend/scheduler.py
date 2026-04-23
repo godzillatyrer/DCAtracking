@@ -14,8 +14,10 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.database import SessionLocal
+from backend.detection.alert_dispatcher import run_alert_dispatch
 from backend.detection.solana_graph_walk import run_solana_graph_walk
 from backend.detection.wallet_activity_tracker import run_wallet_activity_tracker
+from backend.detection.wallet_stats_aggregator import run_wallet_stats_aggregator
 from backend.models.scan_log import ScanLog
 
 logger = logging.getLogger(__name__)
@@ -87,12 +89,33 @@ async def run_wallet_activity_tracker_job():
     started = datetime.utcnow()
     try:
         result = await run_wallet_activity_tracker()
+        # Dispatch alerts on fresh activity right away. Dedup handles
+        # re-firing; this is safe to call every cycle.
+        try:
+            alerts = await run_alert_dispatch()
+            if alerts:
+                result = {**(result or {}), "alerts": alerts}
+        except Exception as e:
+            logger.error(f"alert_dispatch during tracker run failed: {e}")
         log_scan("wallet_activity_tracker", "success",
                  details=str(result) if result else "ok",
                  started_at=started, finished_at=datetime.utcnow())
     except Exception as e:
         logger.error(f"wallet_activity_tracker failed: {e}")
         log_scan("wallet_activity_tracker", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
+async def run_wallet_stats_aggregator_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_wallet_stats_aggregator()
+        log_scan("wallet_stats_aggregator", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"wallet_stats_aggregator failed: {e}")
+        log_scan("wallet_stats_aggregator", "error", error_message=str(e),
                  started_at=started, finished_at=datetime.utcnow())
 
 
@@ -117,6 +140,13 @@ def setup_scheduler() -> AsyncIOScheduler:
         id="wallet_activity_tracker", name="Wallet Activity Tracker",
         minutes=5,
         next_run_time=now + timedelta(seconds=30),
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_wallet_stats_aggregator_job, "wallet_stats_aggregator"),
+        "interval",
+        id="wallet_stats_aggregator", name="Wallet Stats Aggregator",
+        minutes=10,
+        next_run_time=now + timedelta(minutes=1),
     )
 
     return scheduler
