@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.database import SessionLocal
+from backend.anomaly.hyperliquid_watcher import run_hyperliquid_watcher
 from backend.detection.alert_dispatcher import run_alert_dispatch
 from backend.detection.alert_outcome_tracker import run_alert_outcome_tracker
 from backend.detection.behavioral_clusterer import run_behavioral_clusterer
@@ -147,6 +148,19 @@ async def run_behavioral_clusterer_job():
                  started_at=started, finished_at=datetime.utcnow())
 
 
+async def run_hyperliquid_watcher_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_hyperliquid_watcher()
+        log_scan("hyperliquid_watcher", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"hyperliquid_watcher failed: {e}")
+        log_scan("hyperliquid_watcher", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
 def setup_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(job_defaults={
         "max_instances": 1,
@@ -188,6 +202,13 @@ def setup_scheduler() -> AsyncIOScheduler:
         "cron",
         id="behavioral_clusterer", name="Behavioral Clusterer",
         hour=3, minute=15,   # 03:15 UTC nightly
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_hyperliquid_watcher_job, "hyperliquid_watcher"),
+        "interval",
+        id="hyperliquid_watcher", name="Hyperliquid Whale Watcher",
+        minutes=1,
+        next_run_time=now + timedelta(seconds=20),
     )
 
     return scheduler

@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import WalletTracker from './components/WalletTracker';
 import LiveActivity from './components/LiveActivity';
 import Leaderboard from './components/Leaderboard';
+import Anomalies from './components/Anomalies';
 import AlertHistory from './components/AlertHistory';
 import Settings from './components/Settings';
 import Health from './components/Health';
@@ -75,6 +76,7 @@ function App() {
             <NavLink to="/" end style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Tracker</NavLink>
             <NavLink to="/live" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Live Activity</NavLink>
             <NavLink to="/leaderboard" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Leaderboard</NavLink>
+            <NavLink to="/anomalies" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Anomalies</NavLink>
             <NavLink to="/alerts" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Alerts</NavLink>
             <NavLink to="/settings" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Settings</NavLink>
             <NavLink to="/health" style={({ isActive }) => isActive ? activeLinkStyle : linkStyle}>Health</NavLink>
@@ -85,6 +87,7 @@ function App() {
             <Route path="/" element={<WalletTracker />} />
             <Route path="/live" element={<LiveActivity />} />
             <Route path="/leaderboard" element={<Leaderboard />} />
+            <Route path="/anomalies" element={<Anomalies />} />
             <Route path="/alerts" element={<AlertHistory />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/health" element={<Health />} />

@@ -280,6 +280,78 @@ function CexPanel() {
   );
 }
 
+function MajorCoinPanel() {
+  const { data, refetch } = useApi('/major-coins', { refreshInterval: 60000 });
+  const [newSym, setNewSym] = useState('');
+  const [newLabel, setNewLabel] = useState('');
+  const items = data?.items || [];
+
+  async function add() {
+    if (!newSym.trim()) return;
+    try {
+      await apiPost('/major-coins', {
+        symbol: newSym.trim(), label: newLabel.trim(),
+      });
+      setNewSym(''); setNewLabel('');
+      refetch();
+    } catch (e) { alert(e.message); }
+  }
+  async function toggle(sym) {
+    try {
+      await apiPost(`/major-coins/${sym}/toggle`, {});
+      refetch();
+    } catch (e) { alert(e.message); }
+  }
+
+  return (
+    <div style={{ ...card, padding: 0, marginBottom: spacing.xl }}>
+      <div style={{
+        padding: `${spacing.md} ${spacing.lg}`,
+        borderBottom: `1px solid ${colors.border}`,
+      }}>
+        <div style={sectionTitle}>Major coins (anomaly exclusion)</div>
+        <div style={{ fontSize: typography.small, color: colors.textFaint }}>
+          The Hyperliquid whale watcher (and future watchers) ignore
+          these symbols. Add or toggle to tune what counts as a "major."
+        </div>
+      </div>
+      <div style={{ padding: spacing.md, display: 'flex', gap: spacing.sm, flexWrap: 'wrap' }}>
+        <input value={newSym} onChange={(e) => setNewSym(e.target.value)} placeholder="Symbol (e.g. PEPE)" style={{ ...input, width: 180, fontFamily: typography.mono, textTransform: 'uppercase' }} />
+        <input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="Label (optional)" style={{ ...input, flex: '1 1 200px' }} />
+        <button onClick={add} style={buttonPrimary}>Add</button>
+      </div>
+      <div style={{ maxHeight: 320, overflowY: 'auto', padding: `0 ${spacing.lg} ${spacing.md}` }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: typography.small }}>
+          <tbody>
+            {items.map(r => (
+              <tr key={r.symbol} style={{ borderBottom: `1px solid ${colors.border}` }}>
+                <td style={{ padding: 8, fontFamily: typography.mono, fontWeight: 600, color: colors.text }}>
+                  {r.symbol}
+                </td>
+                <td style={{ padding: 8, color: colors.textFaint }}>{r.label || '—'}</td>
+                <td style={{ padding: 8, textAlign: 'right' }}>
+                  <button
+                    onClick={() => toggle(r.symbol)}
+                    style={{
+                      background: r.excluded ? colors.warningSoft : 'transparent',
+                      color: r.excluded ? colors.warning : colors.textFaint,
+                      border: `1px solid ${r.excluded ? colors.warning : colors.borderStrong}`,
+                      borderRadius: radius.pill, padding: '3px 10px',
+                      fontSize: typography.tiny, fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >{r.excluded ? 'EXCLUDED' : 'WATCHED'}</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+
 function Settings() {
   const { data, refetch } = useApi('/settings', { refreshInterval: 0 });
   const items = data?.items || [];
@@ -303,6 +375,7 @@ function Settings() {
           onSaved={refetch}
         />
       ))}
+      <MajorCoinPanel />
       <CexPanel />
       <ReplayPanel />
     </div>
