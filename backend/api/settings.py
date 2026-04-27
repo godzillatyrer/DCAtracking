@@ -165,12 +165,15 @@ def toggle_major_coin(symbol: str, db: Session = Depends(get_db)):
 def list_anomalies(
     limit: int = Query(100, ge=1, le=500),
     source: str | None = Query(None),
+    event_type: str | None = Query(None),
     only_alerted: bool = Query(False),
     db: Session = Depends(get_db),
 ):
     q = db.query(ChainAnomaly)
     if source:
         q = q.filter(ChainAnomaly.source == source)
+    if event_type:
+        q = q.filter(ChainAnomaly.event_type == event_type)
     if only_alerted:
         q = q.filter(ChainAnomaly.is_alerted.is_(True))
     rows = q.order_by(desc(ChainAnomaly.detected_at)).limit(limit).all()
@@ -285,6 +288,8 @@ async def full_health(db: Session = Depends(get_db)):
         "alert_outcome_tracker",
         "behavioral_clusterer",
         "hyperliquid_watcher",
+        "freshie_dormant_watcher",
+        "migration_watcher",
     ]
     jobs = []
     now = datetime.utcnow()

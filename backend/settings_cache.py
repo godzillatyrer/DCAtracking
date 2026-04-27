@@ -88,6 +88,42 @@ DEFAULTS: list[tuple[str, str, Any, str, str]] = [
      "Don't re-alert the same (coin, side) within this many minutes."),
     ("HL_MAX_ALERTS_PER_HOUR", "hyperliquid", 8, "int",
      "Global hourly cap on Hyperliquid whale alerts."),
+
+    # Wallet classifier (used by freshie/dormant watchers)
+    ("WALLET_CLASSIFY_FRESH_MAX_TXS", "classifier", 20, "int",
+     "Max signatures a wallet can have to be classified 'fresh'."),
+    ("WALLET_CLASSIFY_FRESH_MAX_AGE_DAYS", "classifier", 7, "int",
+     "Wallet's first signature must be no older than this to be 'fresh'."),
+    ("WALLET_CLASSIFY_CACHE_TTL_HOURS", "classifier", 24, "int",
+     "How long to cache a wallet's fresh/dormant classification."),
+
+    # Freshie swarm watcher
+    ("FRESHIE_SWARM_ENABLED", "freshie", True, "bool",
+     "Master switch for 'fresh wallets all bought the same coin' alerts."),
+    ("FRESHIE_SWARM_MIN_FRESHIES", "freshie", 4, "int",
+     "Minimum distinct fresh wallets buying within the window."),
+    ("FRESHIE_SWARM_MAX_MC_USD", "freshie", 500_000.0, "float",
+     "Only alert when token MC is below this (USD). Tokens with no pair data still pass."),
+    ("FRESHIE_SWARM_DEDUP_HOURS", "freshie", 6, "int",
+     "Don't re-alert the same mint as a freshie swarm within this many hours."),
+
+    # Dormant swarm watcher
+    ("DORMANT_SWARM_ENABLED", "dormant", True, "bool",
+     "Master switch for 'long-dormant wallets bought the same coin' alerts."),
+    ("DORMANT_SWARM_MIN_WALLETS", "dormant", 3, "int",
+     "Minimum distinct dormant wallets buying within the window."),
+    ("DORMANT_SWARM_MIN_INACTIVE_DAYS", "dormant", 21, "int",
+     "Wallet must have been inactive at least this many days before the buy to count as dormant."),
+    ("DORMANT_SWARM_MAX_MC_USD", "dormant", 5_000_000.0, "float",
+     "Only alert when token MC is below this (USD). Looser than freshie since dormants chase bigger plays."),
+    ("DORMANT_SWARM_DEDUP_HOURS", "dormant", 6, "int",
+     "Don't re-alert the same mint as a dormant swarm within this many hours."),
+
+    # Pump.fun migration tracker
+    ("MIGRATION_TRACKER_ENABLED", "migration", True, "bool",
+     "Master switch for pump.fun graduation alerts."),
+    ("MIGRATION_DEDUP_HOURS", "migration", 168, "int",
+     "Per-mint dedup for migration alerts (default 7 days)."),
 ]
 
 

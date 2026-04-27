@@ -276,6 +276,211 @@ def _format_cabal_exit(event: dict) -> str:
     )
 
 
+# ─── Solana freshie / dormant SWARM alerts ──────────────────────────
+
+def _format_swarm(event: dict, kind: str) -> str:
+    mint = event["mint"]
+    symbol = event.get("symbol") or _short(mint)
+    buyers = event.get("buyers") or []
+    n = len(buyers)
+    mc = event.get("mc_usd") or 0
+    liq = event.get("liq_usd") or 0
+    price = event.get("price_usd") or 0
+
+    if kind == "freshie":
+        title = f"👶 <b>Freshie swarm</b> · <b>{symbol}</b>"
+        descriptor = f"{n} fresh wallets bought"
+    else:
+        title = f"😴 <b>Dormants waking up</b> · <b>{symbol}</b>"
+        descriptor = f"{n} long-dormant wallets bought"
+
+    market_lines = []
+    if mc:
+        market_lines.append(f"<b>MC:</b> {_fmt_usd(mc)}")
+    if liq:
+        market_lines.append(f"<b>Liq:</b> {_fmt_usd(liq)}")
+    if price:
+        price_str = (
+            f"${price:.8f}" if price < 0.01
+            else f"${price:.6f}" if price < 1
+            else f"${price:,.4f}"
+        )
+        market_lines.append(f"<b>Px:</b> {price_str}")
+    market_line = " · ".join(market_lines) if market_lines else ""
+
+    # Top 6 buyer wallets by buy size
+    top = sorted(buyers, key=lambda b: -float(b.get("value_usd") or 0))[:6]
+    wallet_lines = []
+    for b in top:
+        v = float(b.get("value_usd") or 0)
+        sz = f" · {_fmt_usd(v)}" if v else ""
+        wallet_lines.append(f"  • <code>{_short(b['wallet'])}</code>{sz}")
+    if n > len(top):
+        wallet_lines.append(f"  …and {n - len(top)} more")
+
+    return (
+        f"{title}\n\n"
+        f"<b>CA:</b> <code>{mint}</code>\n"
+        + (market_line + "\n" if market_line else "")
+        + f"<b>{descriptor}</b> in the last hour\n"
+        + ("\n" + "\n".join(wallet_lines) if wallet_lines else "")
+        + f"\n\n"
+        f'<a href="https://dexscreener.com/solana/{mint}">DEX Screener</a> · '
+        f'<a href="https://gmgn.ai/sol/token/{mint}">GMGN</a> · '
+        f'<a href="https://pump.fun/coin/{mint}">pump.fun</a>'
+    )
+
+
+async def _fire_swarm(event: dict, kind: str, db: Session | None = None) -> int | None:
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+
+    mint = event["mint"]
+    symbol = event.get("symbol")
+    n = len(event.get("buyers") or [])
+    alert_type = "freshie_swarm" if kind == "freshie" else "dormant_swarm"
+    label = "fresh" if kind == "freshie" else "long-dormant"
+
+    try:
+        alert = Alert(
+            contract_address=mint,
+            token_symbol=(symbol[:128] if symbol else None),
+            alert_type=alert_type,
+            trigger_reason=f"{n} {label} wallets bought {symbol or mint[:8]}",
+            mc_at_alert=event.get("mc_usd") or None,
+            price_at_alert=event.get("price_usd") or None,
+            telegram_sent=False,
+            fired_at=datetime.utcnow(),
+        )
+        db.add(alert)
+        db.commit()
+    except Exception as e:
+        logger.error(f"_fire_swarm({kind}): Alert INSERT failed: {e}")
+        try:
+            db.rollback()
+        finally:
+            if close_db:
+                db.close()
+        return None
+
+    try:
+        msg_id = await send_telegram_message(_format_swarm(event, kind))
+        if msg_id is not None:
+            alert.telegram_sent = True
+            alert.telegram_message_id = msg_id
+            db.commit()
+    except Exception as e:
+        logger.error(f"_fire_swarm({kind}): Telegram send failed: {e}")
+    finally:
+        if close_db:
+            db.close()
+    return alert.id
+
+
+async def fire_freshie_swarm_alert(event: dict, db: Session | None = None) -> int | None:
+    return await _fire_swarm(event, "freshie", db)
+
+
+async def fire_dormant_swarm_alert(event: dict, db: Session | None = None) -> int | None:
+    return await _fire_swarm(event, "dormant", db)
+
+
+# ─── Pump.fun migration alert ────────────────────────────────────────
+
+def _format_migration(event: dict) -> str:
+    mint = event["mint"]
+    symbol = event.get("symbol") or _short(mint)
+    name = event.get("name") or ""
+    mc = event.get("mc_usd") or 0
+    seconds = event.get("seconds_alive") or 0
+
+    title = f"🎓 <b>Pump.fun migration</b> · <b>{symbol}</b>"
+    if name and name != symbol:
+        title += f" <i>({name})</i>"
+
+    age_str = ""
+    if seconds:
+        if seconds < 60:
+            age_str = f"{int(seconds)}s"
+        elif seconds < 3600:
+            age_str = f"{int(seconds // 60)}m"
+        elif seconds < 86400:
+            age_str = f"{seconds / 3600:.1f}h"
+        else:
+            age_str = f"{seconds / 86400:.1f}d"
+
+    info_lines = []
+    if mc:
+        info_lines.append(f"<b>MC:</b> {_fmt_usd(mc)}")
+    if age_str:
+        info_lines.append(f"<b>Age:</b> {age_str}")
+    info_line = " · ".join(info_lines) if info_lines else ""
+
+    socials = []
+    if event.get("twitter"):
+        socials.append(f'<a href="{event["twitter"]}">𝕏</a>')
+    if event.get("telegram"):
+        socials.append(f'<a href="{event["telegram"]}">TG</a>')
+    if event.get("website"):
+        socials.append(f'<a href="{event["website"]}">Web</a>')
+    socials_line = " · ".join(socials) if socials else ""
+
+    return (
+        f"{title}\n\n"
+        f"<b>CA:</b> <code>{mint}</code>\n"
+        + (info_line + "\n" if info_line else "")
+        + (f"<b>Socials:</b> {socials_line}\n" if socials_line else "")
+        + "\n"
+        f'<a href="https://dexscreener.com/solana/{mint}">DEX Screener</a> · '
+        f'<a href="https://gmgn.ai/sol/token/{mint}">GMGN</a> · '
+        f'<a href="https://pump.fun/coin/{mint}">pump.fun</a>'
+    )
+
+
+async def fire_migration_alert(event: dict, db: Session | None = None) -> int | None:
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+    mint = event["mint"]
+    symbol = event.get("symbol")
+    try:
+        alert = Alert(
+            contract_address=mint,
+            token_symbol=(symbol[:128] if symbol else None),
+            alert_type="pump_migration",
+            trigger_reason=f"{symbol or mint[:8]} graduated from pump.fun bonding curve",
+            mc_at_alert=event.get("mc_usd") or None,
+            telegram_sent=False,
+            fired_at=datetime.utcnow(),
+        )
+        db.add(alert)
+        db.commit()
+    except Exception as e:
+        logger.error(f"fire_migration_alert: Alert INSERT failed: {e}")
+        try:
+            db.rollback()
+        finally:
+            if close_db:
+                db.close()
+        return None
+
+    try:
+        msg_id = await send_telegram_message(_format_migration(event))
+        if msg_id is not None:
+            alert.telegram_sent = True
+            alert.telegram_message_id = msg_id
+            db.commit()
+    except Exception as e:
+        logger.error(f"fire_migration_alert: Telegram send failed: {e}")
+    finally:
+        if close_db:
+            db.close()
+    return alert.id
+
+
 # ─── Hyperliquid whale-trade alert ───────────────────────────────────
 
 def _format_hl_whale(event: dict) -> str:
