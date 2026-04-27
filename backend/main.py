@@ -123,6 +123,49 @@ def _seed_cex_addresses() -> None:
 _seed_cex_addresses()
 
 
+def _seed_major_coins() -> None:
+    """Idempotent: seed top-mcap coins to exclude from anomaly watchers."""
+    import json as _json
+    from backend.database import SessionLocal
+    from backend.models.major_coin import MajorCoin
+
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "data", "major_coins.json"
+    )
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path) as f:
+            entries = _json.load(f) or []
+    except Exception as e:
+        logger.warning(f"major coins seed load failed: {e}")
+        return
+    if not entries:
+        return
+    db = SessionLocal()
+    try:
+        existing = {r[0] for r in db.query(MajorCoin.symbol).all()}
+        added = 0
+        for e in entries:
+            if e.get("symbol") and e["symbol"] not in existing:
+                db.add(MajorCoin(
+                    symbol=e["symbol"], label=e.get("label") or e["symbol"],
+                    excluded=True,
+                ))
+                added += 1
+        if added:
+            db.commit()
+            logger.info(f"major coins seed: added {added} symbols")
+    except Exception as e:
+        logger.warning(f"major coins seed failed: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+_seed_major_coins()
+
+
 _scheduler = None
 
 

@@ -76,6 +76,18 @@ DEFAULTS: list[tuple[str, str, Any, str, str]] = [
      "Minimum mints two wallets must have both bought (within window) before behavior-merging their entities."),
     ("BEHAVIOR_TIME_WINDOW_SEC", "clustering", 120, "int",
      "Seconds: two wallets' buys on the same mint count as 'together' if within this window."),
+
+    # Hyperliquid whale watcher
+    ("HL_ENABLED", "hyperliquid", True, "bool",
+     "Master switch for the Hyperliquid whale-trade watcher."),
+    ("HL_MIN_NOTIONAL_USD", "hyperliquid", 1_000_000.0, "float",
+     "Minimum single-trade notional to qualify as a whale trade."),
+    ("HL_FRESH_WALLET_MAX_FILLS", "hyperliquid", 5, "int",
+     "Wallets with this many or fewer total Hyperliquid fills get the FRESH badge."),
+    ("HL_DEDUP_WINDOW_MIN", "hyperliquid", 30, "int",
+     "Don't re-alert the same (coin, side) within this many minutes."),
+    ("HL_MAX_ALERTS_PER_HOUR", "hyperliquid", 8, "int",
+     "Global hourly cap on Hyperliquid whale alerts."),
 ]
 
 

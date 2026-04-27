@@ -276,6 +276,112 @@ def _format_cabal_exit(event: dict) -> str:
     )
 
 
+# ─── Hyperliquid whale-trade alert ───────────────────────────────────
+
+def _format_hl_whale(event: dict) -> str:
+    coin = event["coin"]
+    side = (event.get("side") or "").upper()
+    side_emoji = "🟢 LONG" if side == "LONG" else "🔴 SHORT" if side == "SHORT" else side
+    notional = float(event.get("notional_usd") or 0)
+    px = float(event.get("px") or 0)
+    sz = float(event.get("sz") or 0)
+    actor = event.get("actor") or ""
+    fresh = event.get("is_fresh", False)
+    fill_count = event.get("fill_count", 0)
+
+    fresh_tag = ""
+    if fresh:
+        fresh_tag = f"  🆕 FRESH ({fill_count} prior fills)"
+
+    # Coin links — Hyperliquid uses uppercase ticker in its app URL
+    hl_token_url = f"https://app.hyperliquid.xyz/trade/{coin}"
+    hl_addr_url = f"https://app.hyperliquid.xyz/explorer/address/{actor}"
+    arb_url = f"https://arbiscan.io/address/{actor}"
+
+    market_lines = []
+    if event.get("mark_px"):
+        market_lines.append(f"<b>Mark:</b> ${event['mark_px']:,.6g}")
+    if event.get("day_volume"):
+        market_lines.append(f"<b>24h vol:</b> {_fmt_usd(event['day_volume'])}")
+    if event.get("open_interest"):
+        market_lines.append(f"<b>OI:</b> {_fmt_usd(event['open_interest'])}")
+    if event.get("funding"):
+        funding_pct = event["funding"] * 100
+        sign = "+" if funding_pct >= 0 else ""
+        market_lines.append(f"<b>Fund:</b> {sign}{funding_pct:.4f}%")
+    market_line = " · ".join(market_lines) if market_lines else ""
+
+    px_str = (
+        f"${px:.8f}" if px and px < 0.01
+        else f"${px:.6f}" if px and px < 1
+        else f"${px:,.4f}" if px else "—"
+    )
+
+    return (
+        f"🐋 <b>Hyperliquid whale</b> · <b>{coin}</b> {side_emoji}\n\n"
+        f"<b>Size:</b> {_fmt_usd(notional)} ({sz:,.2f} {coin}) @ {px_str}\n"
+        f"<b>Wallet:</b> <code>{_short(actor)}</code>{fresh_tag}\n"
+        + (market_line + "\n" if market_line else "")
+        + f"\n"
+        f'<a href="{hl_token_url}">Hyperliquid</a> · '
+        f'<a href="{hl_addr_url}">HL Explorer</a> · '
+        f'<a href="{arb_url}">Arbiscan</a>'
+    )
+
+
+async def fire_hl_whale_alert(event: dict, db: Session | None = None) -> int | None:
+    """Persist + send a Hyperliquid whale alert. Dedup key (coin|side)
+    is stored in `contract_address` so the dispatcher's existing
+    24h/per-mint dedup works as a per-(coin,side) dedup for HL."""
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+    coin = event["coin"]
+    side = event.get("side", "")
+    dedup_key = event.get("dedup_key") or f"hl|{coin}|{side}"
+    notional = float(event.get("notional_usd") or 0)
+    fresh_tag = " (fresh)" if event.get("is_fresh") else ""
+    reason = (
+        f"{coin} {side.upper()} {_fmt_usd(notional)}{fresh_tag} "
+        f"by {_short(event.get('actor') or '')}"
+    )
+    try:
+        alert = Alert(
+            contract_address=dedup_key[:64],
+            token_symbol=coin[:128],
+            alert_type="hl_whale_trade",
+            trigger_reason=reason,
+            telegram_sent=False,
+            fired_at=datetime.utcnow(),
+        )
+        db.add(alert)
+        db.commit()
+    except Exception as e:
+        logger.error(f"fire_hl_whale_alert: Alert INSERT failed: {e}")
+        try:
+            db.rollback()
+        finally:
+            if close_db:
+                db.close()
+        return None
+
+    try:
+        msg_id = await send_telegram_message(_format_hl_whale(event))
+        if msg_id is not None:
+            alert.telegram_sent = True
+            alert.telegram_message_id = msg_id
+            db.commit()
+    except Exception as e:
+        logger.error(f"fire_hl_whale_alert: Telegram send failed: {e}")
+    finally:
+        if close_db:
+            db.close()
+    return alert.id
+
+
+# ─── Cabal exit alert ────────────────────────────────────────────────
+
 async def fire_cabal_exit_alert(event: dict, db: Session | None = None) -> int | None:
     close_db = False
     if db is None:

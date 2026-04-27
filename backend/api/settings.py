@@ -19,6 +19,8 @@ from backend.database import get_db
 from backend.models.alert import Alert
 from backend.models.alert_outcome import AlertOutcome
 from backend.models.cex_address import CexAddress
+from backend.models.chain_anomaly import ChainAnomaly
+from backend.models.major_coin import MajorCoin
 from backend.models.scan_log import ScanLog
 from backend.models.solana_known_wallet import SolanaKnownWallet
 from backend.models.solana_wallet_activity import SolanaWalletActivity
@@ -110,6 +112,96 @@ def toggle_cex_address(address: str, db: Session = Depends(get_db)):
     return {"address": address, "is_active": row.is_active}
 
 
+# ─── Major-coin admin (anomaly exclusion list) ───────────────────────
+
+@router.get("/major-coins")
+def list_major_coins(db: Session = Depends(get_db)):
+    rows = db.query(MajorCoin).order_by(MajorCoin.symbol).all()
+    return {
+        "items": [
+            {
+                "symbol": r.symbol, "label": r.label,
+                "excluded": r.excluded,
+                "added_at": r.added_at.isoformat() if r.added_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+class AddMajorRequest(BaseModel):
+    symbol: str
+    label: str = ""
+
+
+@router.post("/major-coins")
+def add_major_coin(req: AddMajorRequest, db: Session = Depends(get_db)):
+    sym = (req.symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(400, detail="symbol required")
+    existing = db.query(MajorCoin).filter_by(symbol=sym).first()
+    if existing:
+        existing.label = req.label or existing.label
+        existing.excluded = True
+    else:
+        db.add(MajorCoin(symbol=sym, label=req.label or sym, excluded=True))
+    db.commit()
+    return {"ok": True, "symbol": sym}
+
+
+@router.post("/major-coins/{symbol}/toggle")
+def toggle_major_coin(symbol: str, db: Session = Depends(get_db)):
+    row = db.query(MajorCoin).filter_by(symbol=symbol.upper()).first()
+    if not row:
+        raise HTTPException(404)
+    row.excluded = not row.excluded
+    db.commit()
+    return {"symbol": row.symbol, "excluded": row.excluded}
+
+
+# ─── Anomaly feed ────────────────────────────────────────────────────
+
+@router.get("/anomalies")
+def list_anomalies(
+    limit: int = Query(100, ge=1, le=500),
+    source: str | None = Query(None),
+    only_alerted: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    q = db.query(ChainAnomaly)
+    if source:
+        q = q.filter(ChainAnomaly.source == source)
+    if only_alerted:
+        q = q.filter(ChainAnomaly.is_alerted.is_(True))
+    rows = q.order_by(desc(ChainAnomaly.detected_at)).limit(limit).all()
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "source": r.source,
+                "event_type": r.event_type,
+                "coin": r.coin,
+                "side": r.side,
+                "notional_usd": float(r.notional_usd) if r.notional_usd is not None else None,
+                "px": float(r.px) if r.px is not None else None,
+                "sz": float(r.sz) if r.sz is not None else None,
+                "actor_address": r.actor_address,
+                "actor_short": (
+                    f"{r.actor_address[:6]}…{r.actor_address[-4:]}"
+                    if r.actor_address and len(r.actor_address) > 12
+                    else r.actor_address
+                ),
+                "is_fresh_wallet": r.is_fresh_wallet,
+                "actor_history_count": r.actor_history_count,
+                "tx_hash": r.tx_hash,
+                "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+                "is_alerted": r.is_alerted,
+            }
+            for r in rows
+        ]
+    }
+
+
 # ─── Outcomes ─────────────────────────────────────────────────────────
 
 @router.get("/outcomes")
@@ -192,6 +284,7 @@ async def full_health(db: Session = Depends(get_db)):
         "wallet_stats_aggregator",
         "alert_outcome_tracker",
         "behavioral_clusterer",
+        "hyperliquid_watcher",
     ]
     jobs = []
     now = datetime.utcnow()
