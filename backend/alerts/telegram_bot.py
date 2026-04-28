@@ -71,6 +71,102 @@ async def send_command_reply(text: str, chat_id: str | None = None) -> int | Non
     return await _send_raw(text, chat_id=chat_id)
 
 
+async def send_with_keyboard(
+    text: str,
+    keyboard: list[list[dict]],
+    chat_id: str | None = None,
+    force_reply: bool = False,
+) -> int | None:
+    """Send a message with an inline keyboard. Used by the bot's
+    button-driven menus."""
+    if not settings.TELEGRAM_BOT_TOKEN:
+        return None
+    target_chat = chat_id or settings.TELEGRAM_CHAT_ID
+    if not target_chat:
+        return None
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+    body = {
+        "chat_id": target_chat,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if force_reply:
+        body["reply_markup"] = {"force_reply": True, "selective": True}
+    elif keyboard:
+        body["reply_markup"] = {"inline_keyboard": keyboard}
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.post(url, json=body)
+            if resp.status_code == 200 and resp.json().get("ok"):
+                return resp.json()["result"]["message_id"]
+            logger.error(f"send_with_keyboard error: {resp.status_code} — {resp.text[:300]}")
+        except Exception as e:
+            logger.error(f"send_with_keyboard error: {e}")
+    return None
+
+
+async def edit_message(
+    chat_id: str,
+    message_id: int,
+    text: str,
+    keyboard: list[list[dict]] | None = None,
+) -> bool:
+    """Edit a previously-sent message in place. Used to navigate menus
+    without filling the chat with new messages."""
+    if not settings.TELEGRAM_BOT_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/editMessageText"
+    body = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if keyboard is not None:
+        body["reply_markup"] = {"inline_keyboard": keyboard}
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.post(url, json=body)
+            if resp.status_code == 200 and resp.json().get("ok"):
+                return True
+            # 400 "message is not modified" is common when nothing
+            # changed — silent success.
+            data = resp.json()
+            desc = (data.get("description") or "").lower()
+            if "not modified" in desc:
+                return True
+            logger.warning(f"edit_message: {resp.status_code} — {resp.text[:200]}")
+        except Exception as e:
+            logger.error(f"edit_message error: {e}")
+    return False
+
+
+async def answer_callback_query(
+    callback_id: str,
+    text: str | None = None,
+    show_alert: bool = False,
+) -> bool:
+    """Acknowledge a button press. Required by Telegram — the loading
+    spinner on the user's button stops only after this. Optional
+    text shows as a small toast / popup."""
+    if not settings.TELEGRAM_BOT_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    body = {"callback_query_id": callback_id}
+    if text:
+        body["text"] = text[:200]
+        body["show_alert"] = show_alert
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            resp = await client.post(url, json=body)
+            return resp.status_code == 200
+        except Exception as e:
+            logger.error(f"answer_callback_query error: {e}")
+    return False
+
+
 # ─── Formatting helpers ──────────────────────────────────────────────
 
 def _fmt_usd(v: float | None, default: str = "—") -> str:

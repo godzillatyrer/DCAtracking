@@ -34,7 +34,12 @@ import httpx
 from sqlalchemy import desc, func
 
 from backend import settings_cache
-from backend.alerts.telegram_bot import send_command_reply
+from backend.alerts.telegram_bot import (
+    answer_callback_query,
+    edit_message,
+    send_command_reply,
+    send_with_keyboard,
+)
 from backend.config import settings
 from backend.database import SessionLocal
 from backend.models.alert import Alert
@@ -69,7 +74,15 @@ async def _get_updates(offset: int | None) -> list[dict]:
     if not settings.TELEGRAM_BOT_TOKEN:
         return []
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/getUpdates"
-    params = {"timeout": 0, "limit": 50}
+    # `allowed_updates` must be a JSON-encoded array. Without it,
+    # Telegram only delivers `message` updates and the menu buttons
+    # would be silent.
+    params = {
+        "timeout": 0, "limit": 50,
+        "allowed_updates": json.dumps([
+            "message", "edited_message", "callback_query",
+        ]),
+    }
     if offset is not None:
         params["offset"] = offset
     try:
@@ -120,7 +133,9 @@ def _find_setting(key: str) -> dict | None:
 async def _cmd_help(args: str) -> str:
     return (
         "<b>Solana Cabal Tracker — Bot Commands</b>\n\n"
+        "💡 Easiest path: send /menu to open the button-driven UI.\n\n"
         "<b>Status</b>\n"
+        "  /menu — main button menu\n"
         "  /status — jobs + DB + alert counts\n"
         "  /stats  — alert counts (24h, 7d)\n\n"
         "<b>Settings</b>\n"
@@ -373,9 +388,151 @@ async def _cmd_cleanup(args: str) -> str:
         db.close()
 
 
+# ─── Inline-keyboard menus ──────────────────────────────────────────
+#
+# callback_data prefixes (kept short; Telegram caps cb_data at 64 bytes):
+#   menu              — main menu
+#   status / stats    — info screens
+#   settings          — categories list
+#   cat:<category>    — settings within a category
+#   set:<KEY>         — single-setting view
+#   tog:<KEY>         — toggle bool, refresh setting view
+#   rst:<KEY>         — reset to default
+#   edt:<KEY>         — prompt user via forceReply for new value
+#   pause / resume    — master switch
+#   cleanup           — cleanup type picker
+#   clean:<type>      — confirm picker for a type
+#   confclean:<type>  — actually delete
+#   noop              — no-op (used for separator labels)
+
+
+def _kb_main_menu() -> list[list[dict]]:
+    paused = bool(settings_cache.get("ALERTS_PAUSED", False))
+    pause_btn = (
+        {"text": "🔔 Resume alerts", "callback_data": "resume"}
+        if paused else
+        {"text": "🔇 Pause alerts", "callback_data": "pause"}
+    )
+    return [
+        [{"text": "📊 Status",   "callback_data": "status"},
+         {"text": "📈 Stats",    "callback_data": "stats"}],
+        [{"text": "⚙️ Settings", "callback_data": "settings"}],
+        [pause_btn,
+         {"text": "🧹 Cleanup",  "callback_data": "cleanup"}],
+        [{"text": "❓ Help",     "callback_data": "help"}],
+    ]
+
+
+def _menu_text() -> str:
+    paused = bool(settings_cache.get("ALERTS_PAUSED", False))
+    state = "🔇 PAUSED" if paused else "🔔 ACTIVE"
+    return (
+        f"<b>Solana Cabal Tracker</b>\n"
+        f"Alerts: <b>{state}</b>\n\n"
+        f"Pick an option below, or send /help for the full text-command list."
+    )
+
+
+def _kb_categories() -> list[list[dict]]:
+    items = _all_settings()
+    cats: dict[str, int] = {}
+    for s in items:
+        c = s.get("category") or "uncategorized"
+        cats[c] = cats.get(c, 0) + 1
+    rows: list[list[dict]] = []
+    pairs = sorted(cats.items())
+    # 2 buttons per row
+    for i in range(0, len(pairs), 2):
+        row = []
+        for cat, n in pairs[i:i + 2]:
+            row.append({"text": f"{cat} ({n})", "callback_data": f"cat:{cat}"})
+        rows.append(row)
+    rows.append([{"text": "⬅️ Back", "callback_data": "menu"}])
+    return rows
+
+
+def _kb_category(cat: str) -> list[list[dict]]:
+    items = [s for s in _all_settings()
+             if (s.get("category") or "").lower() == cat.lower()]
+    rows: list[list[dict]] = []
+    # 1 button per row — keys are long
+    for s in items:
+        v = s.get("value")
+        v_str = "true" if v is True else "false" if v is False else f"{v}"
+        # Truncate the displayed key if very long, but preserve full
+        # key in callback_data
+        label = f"{s['key']}: {v_str}"
+        if len(label) > 50:
+            label = label[:48] + "…"
+        rows.append([{"text": label, "callback_data": f"set:{s['key']}"}])
+    rows.append([{"text": "⬅️ Back", "callback_data": "settings"}])
+    return rows
+
+
+def _kb_setting(key: str) -> list[list[dict]]:
+    s = _find_setting(key)
+    if s is None:
+        return [[{"text": "⬅️ Back", "callback_data": "settings"}]]
+    rows: list[list[dict]] = []
+    if s.get("type") == "bool":
+        rows.append([{"text": "🔄 Toggle", "callback_data": f"tog:{s['key']}"}])
+    else:
+        rows.append([{"text": "✏️ Edit value", "callback_data": f"edt:{s['key']}"}])
+    rows.append([{"text": "↺ Reset to default", "callback_data": f"rst:{s['key']}"}])
+    cat = s.get("category") or ""
+    rows.append([{"text": "⬅️ Back", "callback_data": f"cat:{cat}"}])
+    return rows
+
+
+def _setting_text(key: str) -> str:
+    s = _find_setting(key)
+    if s is None:
+        return f"Unknown setting: <code>{key}</code>"
+    v = s.get("value")
+    d = s.get("default")
+    return (
+        f"<b>{s['key']}</b>\n\n"
+        f"Current: <code>{v}</code>\n"
+        f"Default: <code>{d}</code>\n"
+        f"Type: <code>{s.get('type')}</code>\n"
+        f"Category: <code>{s.get('category')}</code>\n\n"
+        f"<i>{s.get('description') or ''}</i>"
+    )
+
+
+def _kb_cleanup_picker() -> list[list[dict]]:
+    rows = []
+    types = sorted(_ALLOWED_CLEANUP_TYPES)
+    for i in range(0, len(types), 2):
+        row = []
+        for t in types[i:i + 2]:
+            row.append({"text": t, "callback_data": f"clean:{t}"})
+        rows.append(row)
+    rows.append([{"text": "⬅️ Back", "callback_data": "menu"}])
+    return rows
+
+
+def _kb_cleanup_confirm(t: str) -> list[list[dict]]:
+    return [
+        [{"text": f"❗ Delete all {t}", "callback_data": f"confclean:{t}"}],
+        [{"text": "⬅️ Back", "callback_data": "cleanup"}],
+    ]
+
+
+# ─── /menu and other text-cmd entry points to the menu ─────────────
+
+async def _cmd_menu(args: str) -> str | None:
+    """Sends a fresh menu with inline buttons. Returns None because the
+    menu reply is sent via send_with_keyboard, not via the standard
+    reply path."""
+    await send_with_keyboard(_menu_text(), _kb_main_menu())
+    return None
+
+
 _HANDLERS = {
     "help": _cmd_help,
-    "start": _cmd_help,
+    "start": _cmd_menu,
+    "menu": _cmd_menu,
     "status": _cmd_status,
     "stats": _cmd_stats,
     "settings": _cmd_settings,
@@ -392,9 +549,229 @@ _HANDLERS = {
 }
 
 
+# ─── Callback router ────────────────────────────────────────────────
+
+# Edit-value prompts use forceReply. The prompt text encodes the key
+# so the reply handler can look it up. Format must match exactly.
+_EDIT_PROMPT_PREFIX = "Send new value for "
+_EDIT_PROMPT_SUFFIX = " (current: "
+
+
+def _build_edit_prompt(key: str, current: object) -> str:
+    return f"{_EDIT_PROMPT_PREFIX}{key}{_EDIT_PROMPT_SUFFIX}{current})"
+
+
+def _parse_edit_prompt(text: str) -> str | None:
+    if not text or not text.startswith(_EDIT_PROMPT_PREFIX):
+        return None
+    body = text[len(_EDIT_PROMPT_PREFIX):]
+    cut = body.find(_EDIT_PROMPT_SUFFIX)
+    if cut < 0:
+        return None
+    return body[:cut].strip()
+
+
+async def _handle_callback(cb: dict) -> None:
+    cb_id = cb.get("id")
+    msg = cb.get("message") or {}
+    chat = msg.get("chat") or {}
+    chat_id = str(chat.get("id") or "")
+    message_id = msg.get("message_id")
+    data = (cb.get("data") or "").strip()
+
+    # Auth: only the configured chat
+    if not settings.TELEGRAM_CHAT_ID or chat_id != str(settings.TELEGRAM_CHAT_ID):
+        await answer_callback_query(cb_id)
+        return
+
+    if not data or data == "noop":
+        await answer_callback_query(cb_id)
+        return
+
+    # Helper closures over the callback
+    async def _ack(toast: str | None = None, alert: bool = False):
+        await answer_callback_query(cb_id, text=toast, show_alert=alert)
+
+    async def _replace(text: str, kb: list[list[dict]] | None):
+        if message_id is None:
+            await send_with_keyboard(text, kb or [])
+        else:
+            await edit_message(chat_id, message_id, text, kb)
+
+    try:
+        if data == "menu":
+            await _ack()
+            await _replace(_menu_text(), _kb_main_menu())
+            return
+
+        if data == "help":
+            await _ack()
+            kb = [[{"text": "⬅️ Back", "callback_data": "menu"}]]
+            await _replace(await _cmd_help(""), kb)
+            return
+
+        if data == "status":
+            await _ack()
+            kb = [[{"text": "⬅️ Back", "callback_data": "menu"}]]
+            await _replace(await _cmd_status(""), kb)
+            return
+
+        if data == "stats":
+            await _ack()
+            kb = [[{"text": "⬅️ Back", "callback_data": "menu"}]]
+            await _replace(await _cmd_stats(""), kb)
+            return
+
+        if data == "settings":
+            await _ack()
+            await _replace("<b>Settings categories</b>", _kb_categories())
+            return
+
+        if data.startswith("cat:"):
+            cat = data.split(":", 1)[1]
+            await _ack()
+            text = f"<b>{cat.upper()}</b>\nTap a setting to view / edit."
+            await _replace(text, _kb_category(cat))
+            return
+
+        if data.startswith("set:"):
+            key = data.split(":", 1)[1]
+            await _ack()
+            await _replace(_setting_text(key), _kb_setting(key))
+            return
+
+        if data.startswith("tog:"):
+            key = data.split(":", 1)[1]
+            s = _find_setting(key)
+            if s is None or s.get("type") != "bool":
+                await _ack("Not a bool", alert=True)
+                return
+            new_val = not bool(s.get("value"))
+            settings_cache.set_value(key, new_val)
+            await _ack(f"Set {key} = {new_val}")
+            await _replace(_setting_text(key), _kb_setting(key))
+            return
+
+        if data.startswith("rst:"):
+            key = data.split(":", 1)[1]
+            s = _find_setting(key)
+            if s is None:
+                await _ack("Unknown key", alert=True)
+                return
+            settings_cache.reset_default(key)
+            await _ack("Reset to default")
+            await _replace(_setting_text(key), _kb_setting(key))
+            return
+
+        if data.startswith("edt:"):
+            key = data.split(":", 1)[1]
+            s = _find_setting(key)
+            if s is None:
+                await _ack("Unknown key", alert=True)
+                return
+            await _ack()
+            # Send a forceReply prompt — Telegram surfaces a reply-to
+            # field. The user's reply will arrive as a regular message
+            # with reply_to_message set, which we parse to recover key.
+            await send_with_keyboard(
+                _build_edit_prompt(key, s.get("value")),
+                keyboard=[],
+                force_reply=True,
+            )
+            return
+
+        if data == "pause":
+            settings_cache.set_value("ALERTS_PAUSED", True)
+            await _ack("Paused")
+            await _replace(_menu_text(), _kb_main_menu())
+            return
+
+        if data == "resume":
+            settings_cache.set_value("ALERTS_PAUSED", False)
+            await _ack("Resumed")
+            await _replace(_menu_text(), _kb_main_menu())
+            return
+
+        if data == "cleanup":
+            await _ack()
+            await _replace(
+                "<b>Cleanup</b>\nPick an event type to wipe.",
+                _kb_cleanup_picker(),
+            )
+            return
+
+        if data.startswith("clean:"):
+            t = data.split(":", 1)[1]
+            if t not in _ALLOWED_CLEANUP_TYPES:
+                await _ack("Not allowed", alert=True)
+                return
+            await _ack()
+            await _replace(
+                f"<b>Confirm cleanup</b>\n"
+                f"Delete ALL <code>{t}</code> alerts + anomaly rows?",
+                _kb_cleanup_confirm(t),
+            )
+            return
+
+        if data.startswith("confclean:"):
+            t = data.split(":", 1)[1]
+            await _ack("Cleaning…")
+            reply = await _cmd_cleanup(t)
+            kb = [[{"text": "⬅️ Back", "callback_data": "cleanup"}]]
+            await _replace(reply, kb)
+            return
+
+        # Unknown
+        await _ack(f"Unknown action: {data}", alert=True)
+    except Exception as e:
+        logger.error(f"callback {data!r} failed: {e}")
+        try:
+            await _ack(f"Error: {e}", alert=True)
+        except Exception:
+            pass
+
+
+# ─── forceReply value-edit handler ───────────────────────────────────
+
+async def _handle_value_reply(msg: dict) -> bool:
+    """If `msg` is a reply to one of our edit prompts, apply the new
+    value and confirm. Returns True if handled."""
+    reply_to = msg.get("reply_to_message")
+    if not reply_to:
+        return False
+    prompt_text = (reply_to.get("text") or "")
+    key = _parse_edit_prompt(prompt_text)
+    if not key:
+        return False
+    new_value = (msg.get("text") or "").strip()
+    if not new_value:
+        await send_command_reply(
+            f"Empty value — keeping <code>{key}</code> unchanged."
+        )
+        return True
+    s = _find_setting(key)
+    if s is None:
+        await send_command_reply(f"Unknown setting: <code>{key}</code>")
+        return True
+    try:
+        result = settings_cache.set_value(s["key"], new_value)
+        await send_command_reply(
+            f"✅ <code>{result['key']}</code> = <b>{result['value']}</b>"
+        )
+    except Exception as e:
+        await send_command_reply(f"❌ {e}")
+    return True
+
+
 # ─── Update loop ─────────────────────────────────────────────────────
 
 async def _process_one_update(u: dict) -> None:
+    # Inline-button presses arrive as callback_query updates.
+    cb = u.get("callback_query")
+    if cb:
+        await _handle_callback(cb)
+        return
+
     msg = u.get("message") or u.get("edited_message")
     if not msg:
         return
@@ -405,6 +782,11 @@ async def _process_one_update(u: dict) -> None:
     # dropped (the bot ignores DMs from random users).
     if not settings.TELEGRAM_CHAT_ID or chat_id != str(settings.TELEGRAM_CHAT_ID):
         logger.info(f"Ignoring TG message from unauthorized chat {chat_id}")
+        return
+
+    # forceReply edit-value flow: if this message is a reply to one
+    # of our edit prompts, apply the value and we're done.
+    if await _handle_value_reply(msg):
         return
 
     text = (msg.get("text") or "").strip()
