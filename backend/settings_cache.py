@@ -120,10 +120,16 @@ DEFAULTS: list[tuple[str, str, Any, str, str]] = [
      "Don't re-alert the same mint as a dormant swarm within this many hours."),
 
     # Pump.fun migration tracker
-    ("MIGRATION_TRACKER_ENABLED", "migration", True, "bool",
-     "Master switch for pump.fun graduation alerts."),
+    ("MIGRATION_TRACKER_ENABLED", "migration", False, "bool",
+     "Master switch for pump.fun graduation alerts. Default OFF — pump.fun graduates many coins per hour, only enable if you specifically want this firehose."),
     ("MIGRATION_DEDUP_HOURS", "migration", 168, "int",
      "Per-mint dedup for migration alerts (default 7 days)."),
+    ("MIGRATION_MAX_AGE_HOURS", "migration", 6, "int",
+     "Only alert if the token was CREATED within this many hours. Filters out old memes that pump.fun's API surfaces because they happened to trade recently."),
+    ("MIGRATION_MIN_MC_USD", "migration", 40_000.0, "float",
+     "Minimum MC for migration alert. Below this is dust / dead."),
+    ("MIGRATION_MAX_ALERTS_PER_HOUR", "migration", 5, "int",
+     "Hard hourly cap on migration alerts as last-resort throttle."),
 ]
 
 

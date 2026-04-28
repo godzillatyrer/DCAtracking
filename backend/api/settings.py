@@ -159,6 +159,56 @@ def toggle_major_coin(symbol: str, db: Session = Depends(get_db)):
     return {"symbol": row.symbol, "excluded": row.excluded}
 
 
+# ─── Admin cleanup ───────────────────────────────────────────────────
+
+class CleanupRequest(BaseModel):
+    source: str | None = None              # e.g. "solana"
+    event_type: str | None = None          # e.g. "pump_migration"
+    alert_type: str | None = None          # e.g. "pump_migration"
+    older_than_hours: int = 0              # 0 = all matching
+
+
+@router.post("/admin/cleanup-anomalies")
+def cleanup_anomalies(req: CleanupRequest, db: Session = Depends(get_db)):
+    """Mass-delete ChainAnomaly + Alert rows matching the filter.
+    Useful when a noisy watcher floods the feed and you want to reset.
+
+    Example: {"source": "solana", "event_type": "pump_migration",
+              "alert_type": "pump_migration"}
+    """
+    if not (req.source or req.event_type or req.alert_type):
+        raise HTTPException(400, detail="must specify at least one filter")
+
+    deleted_anoms = 0
+    deleted_alerts = 0
+    cutoff = (
+        datetime.utcnow() - timedelta(hours=req.older_than_hours)
+        if req.older_than_hours > 0 else None
+    )
+
+    if req.source or req.event_type:
+        q = db.query(ChainAnomaly)
+        if req.source:
+            q = q.filter(ChainAnomaly.source == req.source)
+        if req.event_type:
+            q = q.filter(ChainAnomaly.event_type == req.event_type)
+        if cutoff:
+            q = q.filter(ChainAnomaly.detected_at <= cutoff)
+        deleted_anoms = q.delete(synchronize_session=False)
+
+    if req.alert_type:
+        aq = db.query(Alert).filter(Alert.alert_type == req.alert_type)
+        if cutoff:
+            aq = aq.filter(Alert.fired_at <= cutoff)
+        deleted_alerts = aq.delete(synchronize_session=False)
+
+    db.commit()
+    return {
+        "deleted_anomalies": deleted_anoms,
+        "deleted_alerts": deleted_alerts,
+    }
+
+
 # ─── Anomaly feed ────────────────────────────────────────────────────
 
 @router.get("/anomalies")
