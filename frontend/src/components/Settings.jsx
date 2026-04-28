@@ -354,7 +354,9 @@ function MajorCoinPanel() {
 
 function Settings() {
   const { data, refetch } = useApi('/settings', { refreshInterval: 0 });
-  const items = data?.items || [];
+  const allItems = data?.items || [];
+  // Hide internal-only categories (prefix _) from the UI
+  const items = allItems.filter(s => !(s.category || '').startsWith('_'));
   const byCategory = items.reduce((acc, s) => {
     (acc[s.category] ||= []).push(s);
     return acc;

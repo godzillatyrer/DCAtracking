@@ -31,6 +31,10 @@ _bootstrapped: bool = False
 # (key, category, default, type, description)
 
 DEFAULTS: list[tuple[str, str, Any, str, str]] = [
+    # Master switches
+    ("ALERTS_PAUSED", "alerts", False, "bool",
+     "When ON, no watcher Telegram alerts are sent (anomalies still log and dedup). /pause and /resume commands toggle this."),
+
     # Convergence alerts
     ("SAME_ENTITY_MIN_WALLETS", "alerts", 3, "int",
      "Minimum wallets from the same funder cluster required to trigger a convergence alert."),
@@ -119,11 +123,41 @@ DEFAULTS: list[tuple[str, str, Any, str, str]] = [
     ("DORMANT_SWARM_DEDUP_HOURS", "dormant", 6, "int",
      "Don't re-alert the same mint as a dormant swarm within this many hours."),
 
+    # EVM (ETH + BSC) freshie/dormant swarm watchers — same logic
+    # as the Solana version, gated per-chain so you can flip them on
+    # individually as you add API keys.
+    ("ETH_FRESHIE_DORMANT_ENABLED", "evm", False, "bool",
+     "Master switch for ETH freshie/dormant swarm alerts. Needs ETHERSCAN_API_KEY."),
+    ("BSC_FRESHIE_DORMANT_ENABLED", "evm", False, "bool",
+     "Master switch for BSC freshie/dormant swarm alerts. Needs BSCSCAN_API_KEY."),
+    ("ETH_MIN_BUY_USD", "evm", 200.0, "float",
+     "Minimum per-trade USD size to consider for ETH (filters dust)."),
+    ("BSC_MIN_BUY_USD", "evm", 50.0, "float",
+     "Minimum per-trade USD size to consider for BSC (filters dust)."),
+    ("ETH_FRESHIE_SWARM_MAX_MC_USD", "evm", 100_000_000.0, "float",
+     "MC ceiling for ETH freshie alerts. ETH alts can run up to nine figures while still pumping."),
+    ("ETH_DORMANT_SWARM_MAX_MC_USD", "evm", 100_000_000.0, "float",
+     "MC ceiling for ETH dormant alerts."),
+    ("BSC_FRESHIE_SWARM_MAX_MC_USD", "evm", 500_000_000.0, "float",
+     "MC ceiling for BSC freshie alerts. BSC memes routinely scale higher."),
+    ("BSC_DORMANT_SWARM_MAX_MC_USD", "evm", 500_000_000.0, "float",
+     "MC ceiling for BSC dormant alerts."),
+
+    # ─ Internal state (hidden from Settings UI; category prefix _) ─
+    ("_LAST_TG_UPDATE_ID", "_internal", 0, "int",
+     "Internal: last Telegram update_id processed by the command poller."),
+
     # Pump.fun migration tracker
-    ("MIGRATION_TRACKER_ENABLED", "migration", True, "bool",
-     "Master switch for pump.fun graduation alerts."),
+    ("MIGRATION_TRACKER_ENABLED", "migration", False, "bool",
+     "Master switch for pump.fun graduation alerts. Default OFF — pump.fun graduates many coins per hour, only enable if you specifically want this firehose."),
     ("MIGRATION_DEDUP_HOURS", "migration", 168, "int",
      "Per-mint dedup for migration alerts (default 7 days)."),
+    ("MIGRATION_MAX_AGE_HOURS", "migration", 6, "int",
+     "Only alert if the token was CREATED within this many hours. Filters out old memes that pump.fun's API surfaces because they happened to trade recently."),
+    ("MIGRATION_MIN_MC_USD", "migration", 40_000.0, "float",
+     "Minimum MC for migration alert. Below this is dust / dead."),
+    ("MIGRATION_MAX_ALERTS_PER_HOUR", "migration", 5, "int",
+     "Hard hourly cap on migration alerts as last-resort throttle."),
 ]
 
 

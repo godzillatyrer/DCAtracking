@@ -14,6 +14,10 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.database import SessionLocal
+from backend.alerts.telegram_commands import run_telegram_command_poller
+from backend.anomaly.evm_freshie_dormant_watcher import (
+    run_bsc_freshie_dormant_watcher, run_eth_freshie_dormant_watcher,
+)
 from backend.anomaly.freshie_dormant_watcher import run_freshie_dormant_watcher
 from backend.anomaly.hyperliquid_watcher import run_hyperliquid_watcher
 from backend.anomaly.migration_watcher import run_migration_watcher
@@ -189,6 +193,41 @@ async def run_migration_watcher_job():
                  started_at=started, finished_at=datetime.utcnow())
 
 
+async def run_eth_freshie_dormant_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_eth_freshie_dormant_watcher()
+        log_scan("eth_freshie_dormant_watcher", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"eth_freshie_dormant_watcher failed: {e}")
+        log_scan("eth_freshie_dormant_watcher", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
+async def run_bsc_freshie_dormant_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_bsc_freshie_dormant_watcher()
+        log_scan("bsc_freshie_dormant_watcher", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"bsc_freshie_dormant_watcher failed: {e}")
+        log_scan("bsc_freshie_dormant_watcher", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
+async def run_telegram_command_poller_job():
+    """Polls Telegram /getUpdates for inbound bot commands. Runs much
+    more often than the watchers (10s) so user commands feel snappy."""
+    try:
+        await run_telegram_command_poller()
+    except Exception as e:
+        logger.error(f"telegram_command_poller failed: {e}")
+
+
 def setup_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(job_defaults={
         "max_instances": 1,
@@ -251,6 +290,32 @@ def setup_scheduler() -> AsyncIOScheduler:
         id="migration_watcher", name="Pump.fun Migration Watcher",
         minutes=2,
         next_run_time=now + timedelta(seconds=30),
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_eth_freshie_dormant_job, "eth_freshie_dormant_watcher"),
+        "interval",
+        id="eth_freshie_dormant_watcher", name="ETH Freshie/Dormant Swarm",
+        minutes=5,
+        next_run_time=now + timedelta(seconds=60),
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_bsc_freshie_dormant_job, "bsc_freshie_dormant_watcher"),
+        "interval",
+        id="bsc_freshie_dormant_watcher", name="BSC Freshie/Dormant Swarm",
+        minutes=5,
+        next_run_time=now + timedelta(seconds=75),
+    )
+    # Telegram command poller — short interval, NOT wrapped in
+    # _wrap_throttled because we want it lightweight + always on. The
+    # poller has its own light error handling.
+    scheduler.add_job(
+        run_telegram_command_poller_job,
+        "interval",
+        id="telegram_command_poller", name="Telegram Command Poller",
+        seconds=10,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=now + timedelta(seconds=15),
     )
 
     return scheduler

@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # DEX Screener (no key needed — pump.fun price fallback)
     DEXSCREENER_BASE_URL: str = "https://api.dexscreener.com"
 
+    # Etherscan / BscScan — used by the EVM freshie/dormant classifier.
+    # Free tier (5 req/sec) is enough; sign up at etherscan.io/apis +
+    # bscscan.com/apis. Watcher logs-and-skips when the key is unset.
+    ETHERSCAN_API_KEY: str = ""
+    BSCSCAN_API_KEY: str = ""
+
     # Alert throttling
     MAX_ALERTS_PER_DAY: int = 10
 

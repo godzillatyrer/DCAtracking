@@ -26,15 +26,22 @@ from backend.models.alert import Alert
 logger = logging.getLogger(__name__)
 
 
-async def send_telegram_message(text: str) -> int | None:
-    if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
+async def _send_raw(text: str, chat_id: str | None = None) -> int | None:
+    """Actually POST a message to Telegram. No pause check, no
+    rate-limit logic — used for both watcher alerts and bot command
+    replies."""
+    if not settings.TELEGRAM_BOT_TOKEN:
         logger.warning("Telegram not configured — skipping message")
+        return None
+    target_chat = chat_id or settings.TELEGRAM_CHAT_ID
+    if not target_chat:
+        logger.warning("No Telegram chat target — skipping message")
         return None
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             resp = await client.post(url, json={
-                "chat_id": settings.TELEGRAM_CHAT_ID,
+                "chat_id": target_chat,
                 "text": text,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
@@ -45,6 +52,119 @@ async def send_telegram_message(text: str) -> int | None:
         except Exception as e:
             logger.error(f"Telegram error: {e}")
     return None
+
+
+async def send_telegram_message(text: str) -> int | None:
+    """Watcher alerts go through here. Honours the ALERTS_PAUSED
+    master switch — when paused, returns None and the alert row will
+    have telegram_sent=False (dedup still updates so we don't re-fire
+    on resume)."""
+    from backend import settings_cache
+    if settings_cache.get("ALERTS_PAUSED", False):
+        logger.info("Alerts paused via ALERTS_PAUSED — suppressing send")
+        return None
+    return await _send_raw(text)
+
+
+async def send_command_reply(text: str, chat_id: str | None = None) -> int | None:
+    """Bot replies — always sent regardless of pause state."""
+    return await _send_raw(text, chat_id=chat_id)
+
+
+async def send_with_keyboard(
+    text: str,
+    keyboard: list[list[dict]],
+    chat_id: str | None = None,
+    force_reply: bool = False,
+) -> int | None:
+    """Send a message with an inline keyboard. Used by the bot's
+    button-driven menus."""
+    if not settings.TELEGRAM_BOT_TOKEN:
+        return None
+    target_chat = chat_id or settings.TELEGRAM_CHAT_ID
+    if not target_chat:
+        return None
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+    body = {
+        "chat_id": target_chat,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if force_reply:
+        body["reply_markup"] = {"force_reply": True, "selective": True}
+    elif keyboard:
+        body["reply_markup"] = {"inline_keyboard": keyboard}
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.post(url, json=body)
+            if resp.status_code == 200 and resp.json().get("ok"):
+                return resp.json()["result"]["message_id"]
+            logger.error(f"send_with_keyboard error: {resp.status_code} — {resp.text[:300]}")
+        except Exception as e:
+            logger.error(f"send_with_keyboard error: {e}")
+    return None
+
+
+async def edit_message(
+    chat_id: str,
+    message_id: int,
+    text: str,
+    keyboard: list[list[dict]] | None = None,
+) -> bool:
+    """Edit a previously-sent message in place. Used to navigate menus
+    without filling the chat with new messages."""
+    if not settings.TELEGRAM_BOT_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/editMessageText"
+    body = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if keyboard is not None:
+        body["reply_markup"] = {"inline_keyboard": keyboard}
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.post(url, json=body)
+            if resp.status_code == 200 and resp.json().get("ok"):
+                return True
+            # 400 "message is not modified" is common when nothing
+            # changed — silent success.
+            data = resp.json()
+            desc = (data.get("description") or "").lower()
+            if "not modified" in desc:
+                return True
+            logger.warning(f"edit_message: {resp.status_code} — {resp.text[:200]}")
+        except Exception as e:
+            logger.error(f"edit_message error: {e}")
+    return False
+
+
+async def answer_callback_query(
+    callback_id: str,
+    text: str | None = None,
+    show_alert: bool = False,
+) -> bool:
+    """Acknowledge a button press. Required by Telegram — the loading
+    spinner on the user's button stops only after this. Optional
+    text shows as a small toast / popup."""
+    if not settings.TELEGRAM_BOT_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    body = {"callback_query_id": callback_id}
+    if text:
+        body["text"] = text[:200]
+        body["show_alert"] = show_alert
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            resp = await client.post(url, json=body)
+            return resp.status_code == 200
+        except Exception as e:
+            logger.error(f"answer_callback_query error: {e}")
+    return False
 
 
 # ─── Formatting helpers ──────────────────────────────────────────────
@@ -278,9 +398,14 @@ def _format_cabal_exit(event: dict) -> str:
 
 # ─── Solana freshie / dormant SWARM alerts ──────────────────────────
 
+_CHAIN_LABELS = {"solana": "SOL", "eth": "ETH", "bsc": "BSC"}
+
+
 def _format_swarm(event: dict, kind: str) -> str:
     mint = event["mint"]
     symbol = event.get("symbol") or _short(mint)
+    chain = (event.get("chain") or "solana").lower()
+    chain_label = _CHAIN_LABELS.get(chain, chain.upper())
     buyers = event.get("buyers") or []
     n = len(buyers)
     mc = event.get("mc_usd") or 0
@@ -288,10 +413,10 @@ def _format_swarm(event: dict, kind: str) -> str:
     price = event.get("price_usd") or 0
 
     if kind == "freshie":
-        title = f"👶 <b>Freshie swarm</b> · <b>{symbol}</b>"
+        title = f"👶 <b>Freshie swarm</b> · {chain_label} · <b>{symbol}</b>"
         descriptor = f"{n} fresh wallets bought"
     else:
-        title = f"😴 <b>Dormants waking up</b> · <b>{symbol}</b>"
+        title = f"😴 <b>Dormants waking up</b> · {chain_label} · <b>{symbol}</b>"
         descriptor = f"{n} long-dormant wallets bought"
 
     market_lines = []
@@ -318,20 +443,40 @@ def _format_swarm(event: dict, kind: str) -> str:
     if n > len(top):
         wallet_lines.append(f"  …and {n - len(top)} more")
 
+    # Chain-aware link block
+    if chain == "solana":
+        links = (
+            f'<a href="https://dexscreener.com/solana/{mint}">DEX Screener</a> · '
+            f'<a href="https://gmgn.ai/sol/token/{mint}">GMGN</a> · '
+            f'<a href="https://pump.fun/coin/{mint}">pump.fun</a>'
+        )
+    elif chain == "eth":
+        links = (
+            f'<a href="https://dexscreener.com/ethereum/{mint}">DEX Screener</a> · '
+            f'<a href="https://etherscan.io/token/{mint}">Etherscan</a> · '
+            f'<a href="https://www.dextools.io/app/en/ether/pair-explorer/{mint}">DEXTools</a>'
+        )
+    elif chain == "bsc":
+        links = (
+            f'<a href="https://dexscreener.com/bsc/{mint}">DEX Screener</a> · '
+            f'<a href="https://bscscan.com/token/{mint}">BscScan</a> · '
+            f'<a href="https://www.dextools.io/app/en/bnb/pair-explorer/{mint}">DEXTools</a>'
+        )
+    else:
+        links = f'<a href="https://dexscreener.com/search?q={mint}">DEX Screener</a>'
+
     return (
         f"{title}\n\n"
         f"<b>CA:</b> <code>{mint}</code>\n"
         + (market_line + "\n" if market_line else "")
         + f"<b>{descriptor}</b> in the last hour\n"
         + ("\n" + "\n".join(wallet_lines) if wallet_lines else "")
-        + f"\n\n"
-        f'<a href="https://dexscreener.com/solana/{mint}">DEX Screener</a> · '
-        f'<a href="https://gmgn.ai/sol/token/{mint}">GMGN</a> · '
-        f'<a href="https://pump.fun/coin/{mint}">pump.fun</a>'
+        + f"\n\n{links}"
     )
 
 
-async def _fire_swarm(event: dict, kind: str, db: Session | None = None) -> int | None:
+async def _fire_swarm(event: dict, kind: str, db: Session | None = None,
+                      alert_type: str | None = None) -> int | None:
     close_db = False
     if db is None:
         db = SessionLocal()
@@ -340,7 +485,8 @@ async def _fire_swarm(event: dict, kind: str, db: Session | None = None) -> int 
     mint = event["mint"]
     symbol = event.get("symbol")
     n = len(event.get("buyers") or [])
-    alert_type = "freshie_swarm" if kind == "freshie" else "dormant_swarm"
+    if alert_type is None:
+        alert_type = "freshie_swarm" if kind == "freshie" else "dormant_swarm"
     label = "fresh" if kind == "freshie" else "long-dormant"
 
     try:
@@ -379,12 +525,14 @@ async def _fire_swarm(event: dict, kind: str, db: Session | None = None) -> int 
     return alert.id
 
 
-async def fire_freshie_swarm_alert(event: dict, db: Session | None = None) -> int | None:
-    return await _fire_swarm(event, "freshie", db)
+async def fire_freshie_swarm_alert(event: dict, db: Session | None = None,
+                                   alert_type: str | None = None) -> int | None:
+    return await _fire_swarm(event, "freshie", db, alert_type=alert_type)
 
 
-async def fire_dormant_swarm_alert(event: dict, db: Session | None = None) -> int | None:
-    return await _fire_swarm(event, "dormant", db)
+async def fire_dormant_swarm_alert(event: dict, db: Session | None = None,
+                                   alert_type: str | None = None) -> int | None:
+    return await _fire_swarm(event, "dormant", db, alert_type=alert_type)
 
 
 # ─── Pump.fun migration alert ────────────────────────────────────────
