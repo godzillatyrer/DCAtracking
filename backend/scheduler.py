@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.database import SessionLocal
+from backend.alerts.telegram_commands import run_telegram_command_poller
 from backend.anomaly.evm_freshie_dormant_watcher import (
     run_bsc_freshie_dormant_watcher, run_eth_freshie_dormant_watcher,
 )
@@ -218,6 +219,15 @@ async def run_bsc_freshie_dormant_job():
                  started_at=started, finished_at=datetime.utcnow())
 
 
+async def run_telegram_command_poller_job():
+    """Polls Telegram /getUpdates for inbound bot commands. Runs much
+    more often than the watchers (10s) so user commands feel snappy."""
+    try:
+        await run_telegram_command_poller()
+    except Exception as e:
+        logger.error(f"telegram_command_poller failed: {e}")
+
+
 def setup_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(job_defaults={
         "max_instances": 1,
@@ -294,6 +304,18 @@ def setup_scheduler() -> AsyncIOScheduler:
         id="bsc_freshie_dormant_watcher", name="BSC Freshie/Dormant Swarm",
         minutes=5,
         next_run_time=now + timedelta(seconds=75),
+    )
+    # Telegram command poller — short interval, NOT wrapped in
+    # _wrap_throttled because we want it lightweight + always on. The
+    # poller has its own light error handling.
+    scheduler.add_job(
+        run_telegram_command_poller_job,
+        "interval",
+        id="telegram_command_poller", name="Telegram Command Poller",
+        seconds=10,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=now + timedelta(seconds=15),
     )
 
     return scheduler

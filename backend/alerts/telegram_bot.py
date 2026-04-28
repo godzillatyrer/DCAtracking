@@ -26,15 +26,22 @@ from backend.models.alert import Alert
 logger = logging.getLogger(__name__)
 
 
-async def send_telegram_message(text: str) -> int | None:
-    if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
+async def _send_raw(text: str, chat_id: str | None = None) -> int | None:
+    """Actually POST a message to Telegram. No pause check, no
+    rate-limit logic — used for both watcher alerts and bot command
+    replies."""
+    if not settings.TELEGRAM_BOT_TOKEN:
         logger.warning("Telegram not configured — skipping message")
+        return None
+    target_chat = chat_id or settings.TELEGRAM_CHAT_ID
+    if not target_chat:
+        logger.warning("No Telegram chat target — skipping message")
         return None
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             resp = await client.post(url, json={
-                "chat_id": settings.TELEGRAM_CHAT_ID,
+                "chat_id": target_chat,
                 "text": text,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
@@ -45,6 +52,23 @@ async def send_telegram_message(text: str) -> int | None:
         except Exception as e:
             logger.error(f"Telegram error: {e}")
     return None
+
+
+async def send_telegram_message(text: str) -> int | None:
+    """Watcher alerts go through here. Honours the ALERTS_PAUSED
+    master switch — when paused, returns None and the alert row will
+    have telegram_sent=False (dedup still updates so we don't re-fire
+    on resume)."""
+    from backend import settings_cache
+    if settings_cache.get("ALERTS_PAUSED", False):
+        logger.info("Alerts paused via ALERTS_PAUSED — suppressing send")
+        return None
+    return await _send_raw(text)
+
+
+async def send_command_reply(text: str, chat_id: str | None = None) -> int | None:
+    """Bot replies — always sent regardless of pause state."""
+    return await _send_raw(text, chat_id=chat_id)
 
 
 # ─── Formatting helpers ──────────────────────────────────────────────

@@ -31,6 +31,10 @@ _bootstrapped: bool = False
 # (key, category, default, type, description)
 
 DEFAULTS: list[tuple[str, str, Any, str, str]] = [
+    # Master switches
+    ("ALERTS_PAUSED", "alerts", False, "bool",
+     "When ON, no watcher Telegram alerts are sent (anomalies still log and dedup). /pause and /resume commands toggle this."),
+
     # Convergence alerts
     ("SAME_ENTITY_MIN_WALLETS", "alerts", 3, "int",
      "Minimum wallets from the same funder cluster required to trigger a convergence alert."),
@@ -138,6 +142,10 @@ DEFAULTS: list[tuple[str, str, Any, str, str]] = [
      "MC ceiling for BSC freshie alerts. BSC memes routinely scale higher."),
     ("BSC_DORMANT_SWARM_MAX_MC_USD", "evm", 500_000_000.0, "float",
      "MC ceiling for BSC dormant alerts."),
+
+    # ─ Internal state (hidden from Settings UI; category prefix _) ─
+    ("_LAST_TG_UPDATE_ID", "_internal", 0, "int",
+     "Internal: last Telegram update_id processed by the command poller."),
 
     # Pump.fun migration tracker
     ("MIGRATION_TRACKER_ENABLED", "migration", False, "bool",
