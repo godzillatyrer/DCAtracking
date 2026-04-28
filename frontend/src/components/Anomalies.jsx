@@ -50,7 +50,17 @@ function CoinLink({ source, coin }) {
       </a>
     );
   }
-  return <span>{coin}</span>;
+  return <span style={{ color: colors.text, fontWeight: typography.semibold }}>{coin}</span>;
+}
+
+function eventTypeBadge(t) {
+  switch (t) {
+    case 'whale_trade':    return { bg: '#cfe9ff', color: '#0066ff', label: 'WHALE' };
+    case 'freshie_swarm':  return { bg: '#dcffe4', color: '#1f8a3a', label: '👶 FRESHIE' };
+    case 'dormant_swarm':  return { bg: '#fff3cf', color: '#9a6b00', label: '😴 DORMANT' };
+    case 'pump_migration': return { bg: '#e9deff', color: '#5e2ec9', label: '🎓 MIGRATION' };
+    default:               return { bg: '#efeff2', color: '#6e6e73', label: (t || '—').toUpperCase() };
+  }
 }
 
 function SourceFilter({ value, onChange, sources }) {
@@ -120,7 +130,7 @@ function Anomalies() {
           }}>Source</div>
           <SourceFilter
             value={source} onChange={setSource}
-            sources={['hyperliquid']}
+            sources={['hyperliquid', 'solana']}
           />
         </div>
         <button
@@ -157,6 +167,7 @@ function Anomalies() {
                 <tr>
                   <th style={th}>When</th>
                   <th style={th}>Source</th>
+                  <th style={th}>Type</th>
                   <th style={th}>Coin</th>
                   <th style={th}>Side</th>
                   <th style={th}>Size</th>
@@ -168,6 +179,7 @@ function Anomalies() {
               <tbody>
                 {items.map(a => {
                   const sb = sideBadge(a.side);
+                  const tb = eventTypeBadge(a.event_type);
                   return (
                     <tr key={a.id}>
                       <td style={{ ...td, color: colors.textFaint, fontSize: typography.small }}>
@@ -175,6 +187,12 @@ function Anomalies() {
                       </td>
                       <td style={td}>
                         <span style={pill('purple')}>{a.source}</span>
+                      </td>
+                      <td style={td}>
+                        <span style={{
+                          ...pill('default'),
+                          background: tb.bg, color: tb.color,
+                        }}>{tb.label}</span>
                       </td>
                       <td style={td}>
                         <CoinLink source={a.source} coin={a.coin} />

@@ -14,7 +14,9 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.database import SessionLocal
+from backend.anomaly.freshie_dormant_watcher import run_freshie_dormant_watcher
 from backend.anomaly.hyperliquid_watcher import run_hyperliquid_watcher
+from backend.anomaly.migration_watcher import run_migration_watcher
 from backend.detection.alert_dispatcher import run_alert_dispatch
 from backend.detection.alert_outcome_tracker import run_alert_outcome_tracker
 from backend.detection.behavioral_clusterer import run_behavioral_clusterer
@@ -161,6 +163,32 @@ async def run_hyperliquid_watcher_job():
                  started_at=started, finished_at=datetime.utcnow())
 
 
+async def run_freshie_dormant_watcher_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_freshie_dormant_watcher()
+        log_scan("freshie_dormant_watcher", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"freshie_dormant_watcher failed: {e}")
+        log_scan("freshie_dormant_watcher", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
+async def run_migration_watcher_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_migration_watcher()
+        log_scan("migration_watcher", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"migration_watcher failed: {e}")
+        log_scan("migration_watcher", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
 def setup_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(job_defaults={
         "max_instances": 1,
@@ -209,6 +237,20 @@ def setup_scheduler() -> AsyncIOScheduler:
         id="hyperliquid_watcher", name="Hyperliquid Whale Watcher",
         minutes=1,
         next_run_time=now + timedelta(seconds=20),
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_freshie_dormant_watcher_job, "freshie_dormant_watcher"),
+        "interval",
+        id="freshie_dormant_watcher", name="Freshie/Dormant Swarm Watcher",
+        minutes=5,
+        next_run_time=now + timedelta(seconds=45),
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_migration_watcher_job, "migration_watcher"),
+        "interval",
+        id="migration_watcher", name="Pump.fun Migration Watcher",
+        minutes=2,
+        next_run_time=now + timedelta(seconds=30),
     )
 
     return scheduler
