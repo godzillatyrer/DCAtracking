@@ -339,6 +339,8 @@ async def full_health(db: Session = Depends(get_db)):
         "behavioral_clusterer",
         "hyperliquid_watcher",
         "freshie_dormant_watcher",
+        "eth_freshie_dormant_watcher",
+        "bsc_freshie_dormant_watcher",
         "migration_watcher",
     ]
     jobs = []

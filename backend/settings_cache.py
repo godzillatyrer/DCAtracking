@@ -119,6 +119,26 @@ DEFAULTS: list[tuple[str, str, Any, str, str]] = [
     ("DORMANT_SWARM_DEDUP_HOURS", "dormant", 6, "int",
      "Don't re-alert the same mint as a dormant swarm within this many hours."),
 
+    # EVM (ETH + BSC) freshie/dormant swarm watchers — same logic
+    # as the Solana version, gated per-chain so you can flip them on
+    # individually as you add API keys.
+    ("ETH_FRESHIE_DORMANT_ENABLED", "evm", False, "bool",
+     "Master switch for ETH freshie/dormant swarm alerts. Needs ETHERSCAN_API_KEY."),
+    ("BSC_FRESHIE_DORMANT_ENABLED", "evm", False, "bool",
+     "Master switch for BSC freshie/dormant swarm alerts. Needs BSCSCAN_API_KEY."),
+    ("ETH_MIN_BUY_USD", "evm", 200.0, "float",
+     "Minimum per-trade USD size to consider for ETH (filters dust)."),
+    ("BSC_MIN_BUY_USD", "evm", 50.0, "float",
+     "Minimum per-trade USD size to consider for BSC (filters dust)."),
+    ("ETH_FRESHIE_SWARM_MAX_MC_USD", "evm", 100_000_000.0, "float",
+     "MC ceiling for ETH freshie alerts. ETH alts can run up to nine figures while still pumping."),
+    ("ETH_DORMANT_SWARM_MAX_MC_USD", "evm", 100_000_000.0, "float",
+     "MC ceiling for ETH dormant alerts."),
+    ("BSC_FRESHIE_SWARM_MAX_MC_USD", "evm", 500_000_000.0, "float",
+     "MC ceiling for BSC freshie alerts. BSC memes routinely scale higher."),
+    ("BSC_DORMANT_SWARM_MAX_MC_USD", "evm", 500_000_000.0, "float",
+     "MC ceiling for BSC dormant alerts."),
+
     # Pump.fun migration tracker
     ("MIGRATION_TRACKER_ENABLED", "migration", False, "bool",
      "Master switch for pump.fun graduation alerts. Default OFF — pump.fun graduates many coins per hour, only enable if you specifically want this firehose."),

@@ -278,9 +278,14 @@ def _format_cabal_exit(event: dict) -> str:
 
 # ─── Solana freshie / dormant SWARM alerts ──────────────────────────
 
+_CHAIN_LABELS = {"solana": "SOL", "eth": "ETH", "bsc": "BSC"}
+
+
 def _format_swarm(event: dict, kind: str) -> str:
     mint = event["mint"]
     symbol = event.get("symbol") or _short(mint)
+    chain = (event.get("chain") or "solana").lower()
+    chain_label = _CHAIN_LABELS.get(chain, chain.upper())
     buyers = event.get("buyers") or []
     n = len(buyers)
     mc = event.get("mc_usd") or 0
@@ -288,10 +293,10 @@ def _format_swarm(event: dict, kind: str) -> str:
     price = event.get("price_usd") or 0
 
     if kind == "freshie":
-        title = f"👶 <b>Freshie swarm</b> · <b>{symbol}</b>"
+        title = f"👶 <b>Freshie swarm</b> · {chain_label} · <b>{symbol}</b>"
         descriptor = f"{n} fresh wallets bought"
     else:
-        title = f"😴 <b>Dormants waking up</b> · <b>{symbol}</b>"
+        title = f"😴 <b>Dormants waking up</b> · {chain_label} · <b>{symbol}</b>"
         descriptor = f"{n} long-dormant wallets bought"
 
     market_lines = []
@@ -318,20 +323,40 @@ def _format_swarm(event: dict, kind: str) -> str:
     if n > len(top):
         wallet_lines.append(f"  …and {n - len(top)} more")
 
+    # Chain-aware link block
+    if chain == "solana":
+        links = (
+            f'<a href="https://dexscreener.com/solana/{mint}">DEX Screener</a> · '
+            f'<a href="https://gmgn.ai/sol/token/{mint}">GMGN</a> · '
+            f'<a href="https://pump.fun/coin/{mint}">pump.fun</a>'
+        )
+    elif chain == "eth":
+        links = (
+            f'<a href="https://dexscreener.com/ethereum/{mint}">DEX Screener</a> · '
+            f'<a href="https://etherscan.io/token/{mint}">Etherscan</a> · '
+            f'<a href="https://www.dextools.io/app/en/ether/pair-explorer/{mint}">DEXTools</a>'
+        )
+    elif chain == "bsc":
+        links = (
+            f'<a href="https://dexscreener.com/bsc/{mint}">DEX Screener</a> · '
+            f'<a href="https://bscscan.com/token/{mint}">BscScan</a> · '
+            f'<a href="https://www.dextools.io/app/en/bnb/pair-explorer/{mint}">DEXTools</a>'
+        )
+    else:
+        links = f'<a href="https://dexscreener.com/search?q={mint}">DEX Screener</a>'
+
     return (
         f"{title}\n\n"
         f"<b>CA:</b> <code>{mint}</code>\n"
         + (market_line + "\n" if market_line else "")
         + f"<b>{descriptor}</b> in the last hour\n"
         + ("\n" + "\n".join(wallet_lines) if wallet_lines else "")
-        + f"\n\n"
-        f'<a href="https://dexscreener.com/solana/{mint}">DEX Screener</a> · '
-        f'<a href="https://gmgn.ai/sol/token/{mint}">GMGN</a> · '
-        f'<a href="https://pump.fun/coin/{mint}">pump.fun</a>'
+        + f"\n\n{links}"
     )
 
 
-async def _fire_swarm(event: dict, kind: str, db: Session | None = None) -> int | None:
+async def _fire_swarm(event: dict, kind: str, db: Session | None = None,
+                      alert_type: str | None = None) -> int | None:
     close_db = False
     if db is None:
         db = SessionLocal()
@@ -340,7 +365,8 @@ async def _fire_swarm(event: dict, kind: str, db: Session | None = None) -> int 
     mint = event["mint"]
     symbol = event.get("symbol")
     n = len(event.get("buyers") or [])
-    alert_type = "freshie_swarm" if kind == "freshie" else "dormant_swarm"
+    if alert_type is None:
+        alert_type = "freshie_swarm" if kind == "freshie" else "dormant_swarm"
     label = "fresh" if kind == "freshie" else "long-dormant"
 
     try:
@@ -379,12 +405,14 @@ async def _fire_swarm(event: dict, kind: str, db: Session | None = None) -> int 
     return alert.id
 
 
-async def fire_freshie_swarm_alert(event: dict, db: Session | None = None) -> int | None:
-    return await _fire_swarm(event, "freshie", db)
+async def fire_freshie_swarm_alert(event: dict, db: Session | None = None,
+                                   alert_type: str | None = None) -> int | None:
+    return await _fire_swarm(event, "freshie", db, alert_type=alert_type)
 
 
-async def fire_dormant_swarm_alert(event: dict, db: Session | None = None) -> int | None:
-    return await _fire_swarm(event, "dormant", db)
+async def fire_dormant_swarm_alert(event: dict, db: Session | None = None,
+                                   alert_type: str | None = None) -> int | None:
+    return await _fire_swarm(event, "dormant", db, alert_type=alert_type)
 
 
 # ─── Pump.fun migration alert ────────────────────────────────────────

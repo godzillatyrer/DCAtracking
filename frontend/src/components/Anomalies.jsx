@@ -27,11 +27,15 @@ function sideBadge(side) {
   return { bg: colors.bgSubtle, color: colors.textFaint, label: side?.toUpperCase() || '—' };
 }
 
-function HlAddrLink({ address, children }) {
+function AddrLink({ address, source, children }) {
   if (!address) return children || '—';
+  let href;
+  if (source === 'hyperliquid') href = `https://app.hyperliquid.xyz/explorer/address/${address}`;
+  else if (source === 'eth') href = `https://etherscan.io/address/${address}`;
+  else if (source === 'bsc') href = `https://bscscan.com/address/${address}`;
+  else href = `https://solscan.io/account/${address}`;
   return (
-    <a href={`https://app.hyperliquid.xyz/explorer/address/${address}`}
-       target="_blank" rel="noreferrer"
+    <a href={href} target="_blank" rel="noreferrer"
        style={{
          color: colors.accent, textDecoration: 'none',
          fontFamily: typography.mono, fontSize: typography.small,
@@ -130,7 +134,7 @@ function Anomalies() {
           }}>Source</div>
           <SourceFilter
             value={source} onChange={setSource}
-            sources={['hyperliquid', 'solana']}
+            sources={['hyperliquid', 'solana', 'eth', 'bsc']}
           />
         </div>
         <button
@@ -207,9 +211,9 @@ function Anomalies() {
                         {fmtUsd(a.notional_usd)}
                       </td>
                       <td style={td}>
-                        <HlAddrLink address={a.actor_address}>
+                        <AddrLink address={a.actor_address} source={a.source}>
                           {a.actor_short}
-                        </HlAddrLink>
+                        </AddrLink>
                       </td>
                       <td style={td}>
                         {a.is_fresh_wallet ? (
