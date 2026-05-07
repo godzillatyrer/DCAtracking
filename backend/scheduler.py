@@ -1,9 +1,25 @@
 """
-APScheduler — Solana cabal tracking jobs.
+APScheduler — Solana CEX-funded accumulation tracking jobs.
 
 Runs in-process via the FastAPI lifespan. Concurrency is capped so the
 256mb Render database + starter plan worker don't OOM when the graph
 walk pulls many tx bodies at once.
+
+Pipeline:
+  1. cex_outflow_harvester  — discover wallets funded from CEX hot
+                              wallets (Binance/OKX/Bybit/Bitget/etc.),
+                              insert as role='cex_funded'.
+  2. wallet_activity_tracker — already-existing job. Picks up the new
+                              cex_funded wallets, records their SPL
+                              buys/sells in solana_wallet_activity.
+  3. accumulation_alerter   — aggregates net holdings across the
+                              cex_funded population per mint, computes
+                              supply %, fires Telegram alert when N+
+                              CEX-funded wallets cross the supply
+                              threshold on a coin in the target mcap
+                              band.
+  4. solana_graph_walk      — finds sibling wallets via SOL hops.
+  5. dca_order_watcher      — Jupiter DCA on low-cap tokens.
 """
 
 import asyncio
@@ -15,13 +31,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.database import SessionLocal
 from backend.alerts.telegram_commands import run_telegram_command_poller
-from backend.anomaly.evm_freshie_dormant_watcher import (
-    run_bsc_freshie_dormant_watcher, run_eth_freshie_dormant_watcher,
-)
+from backend.anomaly.accumulation_alerter import run_accumulation_alerter
+from backend.anomaly.cex_outflow_harvester import run_cex_outflow_harvester
 from backend.anomaly.dca_order_watcher import run_dca_order_watcher
-from backend.anomaly.freshie_dormant_watcher import run_freshie_dormant_watcher
-from backend.anomaly.hyperliquid_watcher import run_hyperliquid_watcher
-from backend.anomaly.migration_watcher import run_migration_watcher
 from backend.detection.alert_dispatcher import run_alert_dispatch
 from backend.detection.alert_outcome_tracker import run_alert_outcome_tracker
 from backend.detection.behavioral_clusterer import run_behavioral_clusterer
@@ -82,25 +94,29 @@ def _wrap_throttled(fn, job_name: str):
     return _wrapped
 
 
-async def run_solana_graph_walk_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_solana_graph_walk()
-        log_scan("solana_graph_walk", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"solana_graph_walk failed: {e}")
-        log_scan("solana_graph_walk", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
+def _runner(name, fn):
+    """Build a `started/log/error` wrapper around an async job function."""
+    async def _job():
+        started = datetime.utcnow()
+        try:
+            result = await fn()
+            log_scan(name, "success",
+                     details=str(result) if result else "ok",
+                     started_at=started, finished_at=datetime.utcnow())
+        except Exception as e:
+            logger.error(f"{name} failed: {e}")
+            log_scan(name, "error", error_message=str(e),
+                     started_at=started, finished_at=datetime.utcnow())
+    _job.__name__ = f"{name}_runner"
+    return _job
 
 
 async def run_wallet_activity_tracker_job():
+    """Activity tracker is special — it also kicks the convergence
+    dispatcher every cycle so cabal-aping alerts fire promptly."""
     started = datetime.utcnow()
     try:
         result = await run_wallet_activity_tracker()
-        # Dispatch alerts on fresh activity right away. Dedup handles
-        # re-firing; this is safe to call every cycle.
         try:
             alerts = await run_alert_dispatch()
             if alerts:
@@ -113,123 +129,6 @@ async def run_wallet_activity_tracker_job():
     except Exception as e:
         logger.error(f"wallet_activity_tracker failed: {e}")
         log_scan("wallet_activity_tracker", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
-
-
-async def run_wallet_stats_aggregator_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_wallet_stats_aggregator()
-        log_scan("wallet_stats_aggregator", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"wallet_stats_aggregator failed: {e}")
-        log_scan("wallet_stats_aggregator", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
-
-
-async def run_alert_outcome_tracker_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_alert_outcome_tracker()
-        log_scan("alert_outcome_tracker", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"alert_outcome_tracker failed: {e}")
-        log_scan("alert_outcome_tracker", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
-
-
-async def run_behavioral_clusterer_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_behavioral_clusterer()
-        log_scan("behavioral_clusterer", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"behavioral_clusterer failed: {e}")
-        log_scan("behavioral_clusterer", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
-
-
-async def run_hyperliquid_watcher_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_hyperliquid_watcher()
-        log_scan("hyperliquid_watcher", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"hyperliquid_watcher failed: {e}")
-        log_scan("hyperliquid_watcher", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
-
-
-async def run_freshie_dormant_watcher_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_freshie_dormant_watcher()
-        log_scan("freshie_dormant_watcher", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"freshie_dormant_watcher failed: {e}")
-        log_scan("freshie_dormant_watcher", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
-
-
-async def run_migration_watcher_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_migration_watcher()
-        log_scan("migration_watcher", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"migration_watcher failed: {e}")
-        log_scan("migration_watcher", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
-
-
-async def run_eth_freshie_dormant_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_eth_freshie_dormant_watcher()
-        log_scan("eth_freshie_dormant_watcher", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"eth_freshie_dormant_watcher failed: {e}")
-        log_scan("eth_freshie_dormant_watcher", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
-
-
-async def run_bsc_freshie_dormant_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_bsc_freshie_dormant_watcher()
-        log_scan("bsc_freshie_dormant_watcher", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"bsc_freshie_dormant_watcher failed: {e}")
-        log_scan("bsc_freshie_dormant_watcher", "error", error_message=str(e),
-                 started_at=started, finished_at=datetime.utcnow())
-
-
-async def run_dca_order_watcher_job():
-    started = datetime.utcnow()
-    try:
-        result = await run_dca_order_watcher()
-        log_scan("dca_order_watcher", "success",
-                 details=str(result) if result else "ok",
-                 started_at=started, finished_at=datetime.utcnow())
-    except Exception as e:
-        logger.error(f"dca_order_watcher failed: {e}")
-        log_scan("dca_order_watcher", "error", error_message=str(e),
                  started_at=started, finished_at=datetime.utcnow())
 
 
@@ -250,8 +149,29 @@ def setup_scheduler() -> AsyncIOScheduler:
     })
 
     now = datetime.utcnow()
+
+    # ── CEX-funded wallet pipeline (the new core) ──────────────────
     scheduler.add_job(
-        _wrap_throttled(run_solana_graph_walk_job, "solana_graph_walk"),
+        _wrap_throttled(_runner("cex_outflow_harvester", run_cex_outflow_harvester),
+                        "cex_outflow_harvester"),
+        "interval",
+        id="cex_outflow_harvester", name="CEX Outflow Harvester",
+        minutes=10,
+        next_run_time=now + timedelta(seconds=20),
+    )
+    scheduler.add_job(
+        _wrap_throttled(_runner("accumulation_alerter", run_accumulation_alerter),
+                        "accumulation_alerter"),
+        "interval",
+        id="accumulation_alerter", name="CEX Accumulation Alerter",
+        minutes=20,
+        next_run_time=now + timedelta(minutes=3),
+    )
+
+    # ── Existing Solana cabal pipeline ─────────────────────────────
+    scheduler.add_job(
+        _wrap_throttled(_runner("solana_graph_walk", run_solana_graph_walk),
+                        "solana_graph_walk"),
         "interval",
         id="solana_graph_walk", name="Solana Graph Walk",
         minutes=15,
@@ -265,62 +185,31 @@ def setup_scheduler() -> AsyncIOScheduler:
         next_run_time=now + timedelta(seconds=30),
     )
     scheduler.add_job(
-        _wrap_throttled(run_wallet_stats_aggregator_job, "wallet_stats_aggregator"),
+        _wrap_throttled(_runner("wallet_stats_aggregator", run_wallet_stats_aggregator),
+                        "wallet_stats_aggregator"),
         "interval",
         id="wallet_stats_aggregator", name="Wallet Stats Aggregator",
         minutes=10,
         next_run_time=now + timedelta(minutes=1),
     )
     scheduler.add_job(
-        _wrap_throttled(run_alert_outcome_tracker_job, "alert_outcome_tracker"),
+        _wrap_throttled(_runner("alert_outcome_tracker", run_alert_outcome_tracker),
+                        "alert_outcome_tracker"),
         "interval",
         id="alert_outcome_tracker", name="Alert Outcome Tracker",
         minutes=10,
         next_run_time=now + timedelta(minutes=2),
     )
     scheduler.add_job(
-        _wrap_throttled(run_behavioral_clusterer_job, "behavioral_clusterer"),
+        _wrap_throttled(_runner("behavioral_clusterer", run_behavioral_clusterer),
+                        "behavioral_clusterer"),
         "cron",
         id="behavioral_clusterer", name="Behavioral Clusterer",
         hour=3, minute=15,   # 03:15 UTC nightly
     )
     scheduler.add_job(
-        _wrap_throttled(run_hyperliquid_watcher_job, "hyperliquid_watcher"),
-        "interval",
-        id="hyperliquid_watcher", name="Hyperliquid Whale Watcher",
-        minutes=1,
-        next_run_time=now + timedelta(seconds=20),
-    )
-    scheduler.add_job(
-        _wrap_throttled(run_freshie_dormant_watcher_job, "freshie_dormant_watcher"),
-        "interval",
-        id="freshie_dormant_watcher", name="Freshie/Dormant Swarm Watcher",
-        minutes=5,
-        next_run_time=now + timedelta(seconds=45),
-    )
-    scheduler.add_job(
-        _wrap_throttled(run_migration_watcher_job, "migration_watcher"),
-        "interval",
-        id="migration_watcher", name="Pump.fun Migration Watcher",
-        minutes=2,
-        next_run_time=now + timedelta(seconds=30),
-    )
-    scheduler.add_job(
-        _wrap_throttled(run_eth_freshie_dormant_job, "eth_freshie_dormant_watcher"),
-        "interval",
-        id="eth_freshie_dormant_watcher", name="ETH Freshie/Dormant Swarm",
-        minutes=5,
-        next_run_time=now + timedelta(seconds=60),
-    )
-    scheduler.add_job(
-        _wrap_throttled(run_bsc_freshie_dormant_job, "bsc_freshie_dormant_watcher"),
-        "interval",
-        id="bsc_freshie_dormant_watcher", name="BSC Freshie/Dormant Swarm",
-        minutes=5,
-        next_run_time=now + timedelta(seconds=75),
-    )
-    scheduler.add_job(
-        _wrap_throttled(run_dca_order_watcher_job, "dca_order_watcher"),
+        _wrap_throttled(_runner("dca_order_watcher", run_dca_order_watcher),
+                        "dca_order_watcher"),
         "interval",
         id="dca_order_watcher", name="Jupiter DCA Order Watcher",
         minutes=3,

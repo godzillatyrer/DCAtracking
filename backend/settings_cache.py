@@ -81,69 +81,15 @@ DEFAULTS: list[tuple[str, str, Any, str, str]] = [
     ("BEHAVIOR_TIME_WINDOW_SEC", "clustering", 120, "int",
      "Seconds: two wallets' buys on the same mint count as 'together' if within this window."),
 
-    # Hyperliquid whale watcher
-    ("HL_ENABLED", "hyperliquid", True, "bool",
-     "Master switch for the Hyperliquid whale-trade watcher."),
-    ("HL_MIN_NOTIONAL_USD", "hyperliquid", 250_000.0, "float",
-     "Minimum single-trade notional for NON-fresh wallets to qualify as a whale trade."),
-    ("HL_FRESH_MIN_NOTIONAL_USD", "hyperliquid", 50_000.0, "float",
-     "Minimum single-trade notional for FRESH wallets. Much lower than whale threshold because a fresh wallet opening even a $50k position on a small-cap perp is highly suspicious."),
-    ("HL_FRESH_WALLET_MAX_FILLS", "hyperliquid", 10, "int",
-     "Wallets with this many or fewer total Hyperliquid fills get the FRESH badge."),
-    ("HL_DEDUP_WINDOW_MIN", "hyperliquid", 30, "int",
-     "Don't re-alert the same (coin, side) within this many minutes."),
-    ("HL_MAX_ALERTS_PER_HOUR", "hyperliquid", 8, "int",
-     "Global hourly cap on Hyperliquid whale alerts."),
-
-    # Wallet classifier (used by freshie/dormant watchers)
+    # Wallet classifier (used by graph walk + DCA watcher)
     ("WALLET_CLASSIFY_FRESH_MAX_TXS", "classifier", 20, "int",
      "Max signatures a wallet can have to be classified 'fresh'."),
     ("WALLET_CLASSIFY_FRESH_MAX_AGE_DAYS", "classifier", 7, "int",
      "Wallet's first signature must be no older than this to be 'fresh'."),
     ("WALLET_CLASSIFY_CACHE_TTL_HOURS", "classifier", 24, "int",
      "How long to cache a wallet's fresh/dormant classification."),
-
-    # Freshie swarm watcher
-    ("FRESHIE_SWARM_ENABLED", "freshie", True, "bool",
-     "Master switch for 'fresh wallets all bought the same coin' alerts."),
-    ("FRESHIE_SWARM_MIN_FRESHIES", "freshie", 4, "int",
-     "Minimum distinct fresh wallets buying within the window."),
-    ("FRESHIE_SWARM_MAX_MC_USD", "freshie", 500_000.0, "float",
-     "Only alert when token MC is below this (USD). Tokens with no pair data still pass."),
-    ("FRESHIE_SWARM_DEDUP_HOURS", "freshie", 6, "int",
-     "Don't re-alert the same mint as a freshie swarm within this many hours."),
-
-    # Dormant swarm watcher
-    ("DORMANT_SWARM_ENABLED", "dormant", True, "bool",
-     "Master switch for 'long-dormant wallets bought the same coin' alerts."),
-    ("DORMANT_SWARM_MIN_WALLETS", "dormant", 3, "int",
-     "Minimum distinct dormant wallets buying within the window."),
-    ("DORMANT_SWARM_MIN_INACTIVE_DAYS", "dormant", 21, "int",
+    ("DORMANT_MIN_INACTIVE_DAYS", "classifier", 21, "int",
      "Wallet must have been inactive at least this many days before the buy to count as dormant."),
-    ("DORMANT_SWARM_MAX_MC_USD", "dormant", 5_000_000.0, "float",
-     "Only alert when token MC is below this (USD). Looser than freshie since dormants chase bigger plays."),
-    ("DORMANT_SWARM_DEDUP_HOURS", "dormant", 6, "int",
-     "Don't re-alert the same mint as a dormant swarm within this many hours."),
-
-    # EVM (ETH + BSC) freshie/dormant swarm watchers — same logic
-    # as the Solana version, gated per-chain so you can flip them on
-    # individually as you add API keys.
-    ("ETH_FRESHIE_DORMANT_ENABLED", "evm", False, "bool",
-     "Master switch for ETH freshie/dormant swarm alerts. Needs ETHERSCAN_API_KEY."),
-    ("BSC_FRESHIE_DORMANT_ENABLED", "evm", False, "bool",
-     "Master switch for BSC freshie/dormant swarm alerts. Needs BSCSCAN_API_KEY."),
-    ("ETH_MIN_BUY_USD", "evm", 200.0, "float",
-     "Minimum per-trade USD size to consider for ETH (filters dust)."),
-    ("BSC_MIN_BUY_USD", "evm", 50.0, "float",
-     "Minimum per-trade USD size to consider for BSC (filters dust)."),
-    ("ETH_FRESHIE_SWARM_MAX_MC_USD", "evm", 100_000_000.0, "float",
-     "MC ceiling for ETH freshie alerts. ETH alts can run up to nine figures while still pumping."),
-    ("ETH_DORMANT_SWARM_MAX_MC_USD", "evm", 100_000_000.0, "float",
-     "MC ceiling for ETH dormant alerts."),
-    ("BSC_FRESHIE_SWARM_MAX_MC_USD", "evm", 500_000_000.0, "float",
-     "MC ceiling for BSC freshie alerts. BSC memes routinely scale higher."),
-    ("BSC_DORMANT_SWARM_MAX_MC_USD", "evm", 500_000_000.0, "float",
-     "MC ceiling for BSC dormant alerts."),
 
     # ─ Internal state (hidden from Settings UI; category prefix _) ─
     ("_LAST_TG_UPDATE_ID", "_internal", 0, "int",
@@ -161,17 +107,39 @@ DEFAULTS: list[tuple[str, str, Any, str, str]] = [
     ("DCA_ORDER_MAX_ALERTS_PER_HOUR", "dca", 3, "int",
      "Hourly cap on DCA order alerts to Telegram."),
 
-    # Pump.fun migration tracker
-    ("MIGRATION_TRACKER_ENABLED", "migration", False, "bool",
-     "Master switch for pump.fun graduation alerts. Default OFF — pump.fun graduates many coins per hour, only enable if you specifically want this firehose."),
-    ("MIGRATION_DEDUP_HOURS", "migration", 168, "int",
-     "Per-mint dedup for migration alerts (default 7 days)."),
-    ("MIGRATION_MAX_AGE_HOURS", "migration", 6, "int",
-     "Only alert if the token was CREATED within this many hours. Filters out old memes that pump.fun's API surfaces because they happened to trade recently."),
-    ("MIGRATION_MIN_MC_USD", "migration", 40_000.0, "float",
-     "Minimum MC for migration alert. Below this is dust / dead."),
-    ("MIGRATION_MAX_ALERTS_PER_HOUR", "migration", 5, "int",
-     "Hard hourly cap on migration alerts as last-resort throttle."),
+    # CEX-funded accumulation pipeline (the new core detector)
+    ("CEX_HARVEST_ENABLED", "cex_accum", True, "bool",
+     "Master switch for the CEX outflow harvester. Polls CEX hot wallets for outflows and adds new recipients as cex_funded tracked wallets."),
+    ("CEX_HARVEST_SIGS_PER_HOT", "cex_accum", 80, "int",
+     "Number of recent signatures to scan per CEX hot wallet per cycle."),
+    ("CEX_HARVEST_MIN_SOL", "cex_accum", 1.0, "float",
+     "Minimum SOL transfer size to count as a fundable outflow (filters dust). 1 SOL is the smallest realistic insider funding amount."),
+    ("CEX_HARVEST_MAX_SOL", "cex_accum", 5000.0, "float",
+     "Skip outflows larger than this — likely OTC desks or treasury, not insiders."),
+    ("CEX_HARVEST_TARGET_EXCHANGES", "cex_accum",
+     "binance,okx,bybit,bitget", "str",
+     "Comma-separated list of CEX names (matched against cex_addresses.exchange) whose outflows we harvest. Lower-priority exchanges can be added at runtime."),
+
+    ("CEX_ACCUMULATION_ENABLED", "cex_accum", True, "bool",
+     "Master switch for the CEX-funded accumulation alerter."),
+    ("CEX_ACCUMULATION_MIN_WALLETS", "cex_accum", 3, "int",
+     "Minimum number of CEX-funded wallets net-long on the same mint to trigger an alert."),
+    ("CEX_ACCUMULATION_MIN_SUPPLY_PCT", "cex_accum", 1.5, "float",
+     "Minimum cumulative percentage of token supply held by the wallet group. Below this the accumulation isn't meaningful."),
+    ("CEX_ACCUMULATION_MIN_NET_USD_PER_WALLET", "cex_accum", 500.0, "float",
+     "Each wallet must have spent at least this in net buys (buy USD - sell USD) on the mint to be counted. Filters drive-by pump.fun apes."),
+    ("CEX_ACCUMULATION_MIN_HOLD_HOURS", "cex_accum", 24.0, "float",
+     "Earliest buy must be at least this many hours ago. Stealth accumulation, not same-day apes."),
+    ("CEX_ACCUMULATION_MAX_SELL_RATIO", "cex_accum", 0.30, "float",
+     "Wallet group's total sell USD / total buy USD must be at most this. Above this means they're flipping, not accumulating."),
+    ("CEX_ACCUMULATION_MIN_MC_USD", "cex_accum", 500_000.0, "float",
+     "Token MC floor. Below $500k is pump.fun noise."),
+    ("CEX_ACCUMULATION_MAX_MC_USD", "cex_accum", 20_000_000.0, "float",
+     "Token MC ceiling. Above $20M the insider edge is mostly priced in."),
+    ("CEX_ACCUMULATION_DEDUP_HOURS", "cex_accum", 168, "int",
+     "Per-mint dedup window. Default 7 days — once we've alerted, don't spam."),
+    ("CEX_ACCUMULATION_MAX_ALERTS_PER_HOUR", "cex_accum", 4, "int",
+     "Global hourly cap on CEX accumulation alerts."),
 ]
 
 

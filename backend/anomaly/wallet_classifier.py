@@ -1,7 +1,7 @@
-"""Cheap fresh/dormant classifier — works on Solana, Ethereum, BSC.
+"""Cheap fresh/dormant classifier — Solana only.
 
-For each input (address, chain):
-  - Pull the last N transactions/signatures (one explorer call).
+For each wallet:
+  - Pull last N signatures via Helius (one RPC call).
   - Classify:
       fresh   = tx count <= FRESH_MAX_TXS AND first tx within
                 FRESH_MAX_AGE_DAYS
@@ -9,9 +9,13 @@ For each input (address, chain):
                 older than DORMANT_MIN_INACTIVE_DAYS (catches the
                 "wallet woke up to buy" case; the most recent tx is
                 often the buy that triggered classification)
-  - Cache in `wallet_classifications` (chain-qualified) for
-    CACHE_TTL_HOURS. Fresh→active is a slow transition — 24h cache
-    is the difference between "feasible" and "we melt our RPC credits."
+  - Cache in `wallet_classifications` for CACHE_TTL_HOURS. Fresh→active
+    is a slow transition — 24h cache is the difference between
+    "feasible" and "we melt our RPC credits."
+
+IMPORTANT: a wallet whose Helius lookup returned NO timestamps is
+classified as is_fresh=False — this used to be True, which silently
+inflated freshie counts on every RPC blip.
 """
 
 import asyncio
@@ -21,8 +25,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from backend import settings_cache
-from backend.clients import evm_explorer, helius
-from backend.database import SessionLocal
+from backend.clients import helius
 from backend.models.wallet_classification import WalletClassification
 
 logger = logging.getLogger(__name__)
@@ -36,37 +39,18 @@ def _cfg(key, default):
     return settings_cache.get(key, default)
 
 
-async def _fetch_timestamps(addr: str, chain: str) -> list[datetime]:
+async def _fetch_timestamps(addr: str) -> list[datetime]:
     """Returns recent activity timestamps for the wallet, newest first.
-    Chain-agnostic: dispatches to the right explorer. Empty list on
-    any failure or missing config.
+    Empty list on any failure or missing config.
     """
-    if not addr:
+    if not addr or not helius.configured:
         return []
-    if chain == "solana":
-        if not helius.configured:
-            return []
-        sigs = await helius.get_signatures(addr, limit=SIG_LIMIT)
-        return [
-            datetime.utcfromtimestamp(s["blockTime"])
-            for s in (sigs or [])
-            if s.get("blockTime")
-        ]
-    if chain in ("eth", "bsc"):
-        if not evm_explorer.configured_for(chain):
-            return []
-        txs = await evm_explorer.get_recent_txs(addr, chain, limit=SIG_LIMIT)
-        out = []
-        for t in txs:
-            ts = t.get("timeStamp")
-            if not ts:
-                continue
-            try:
-                out.append(datetime.utcfromtimestamp(int(ts)))
-            except Exception:
-                continue
-        return out
-    return []
+    sigs = await helius.get_signatures(addr, limit=SIG_LIMIT)
+    return [
+        datetime.utcfromtimestamp(s["blockTime"])
+        for s in (sigs or [])
+        if s.get("blockTime")
+    ]
 
 
 def _classify_from_sigs(
@@ -81,8 +65,7 @@ def _classify_from_sigs(
     """Pure function — classifies given a list of activity timestamps.
 
     Accepts EITHER a list of timestamps directly (preferred) OR a
-    list of dicts with 'blockTime' fields (legacy Solana shape) so
-    existing tests still pass.
+    list of dicts with 'blockTime' fields (legacy Solana shape).
     """
     if timestamps is None:
         sigs = sigs or []
@@ -101,10 +84,9 @@ def _classify_from_sigs(
         "last_active_at": None,
     }
     if not times:
-        # Either no activity (truly new), or rate-limited / no key.
-        # Treat as fresh — caller may want to suppress this case if
-        # they care about the difference.
-        out["is_fresh"] = True
+        # No activity observed (rate-limited, missing key, or genuinely
+        # never moved). Refuse to call this fresh — better a false
+        # negative than a noise-flood false positive.
         return out
 
     times.sort()  # ascending
@@ -128,18 +110,16 @@ def _classify_from_sigs(
 
 
 async def classify_wallet(addr: str, db: Session, chain: str = "solana") -> dict:
-    """Cached, chain-aware. Returns dict with is_fresh, is_dormant, ..."""
+    """Cached. `chain` kwarg retained for API compat; only solana is
+    supported. Returns dict with is_fresh, is_dormant, ..."""
     if not addr:
         return {"is_fresh": False, "is_dormant": False}
-
-    # EVM addresses are case-insensitive; normalize for stable cache keys.
-    cache_key = addr.lower() if chain in ("eth", "bsc") else addr
 
     now = datetime.utcnow()
     cache_ttl = int(_cfg("WALLET_CLASSIFY_CACHE_TTL_HOURS", 24))
 
     cached = db.query(WalletClassification).filter_by(
-        wallet_address=cache_key, chain=chain,
+        wallet_address=addr, chain="solana",
     ).first()
     if cached and cached.expires_at and cached.expires_at > now:
         return {
@@ -152,9 +132,9 @@ async def classify_wallet(addr: str, db: Session, chain: str = "solana") -> dict
 
     fresh_max_txs = int(_cfg("WALLET_CLASSIFY_FRESH_MAX_TXS", 20))
     fresh_max_age = int(_cfg("WALLET_CLASSIFY_FRESH_MAX_AGE_DAYS", 7))
-    dormant_min = int(_cfg("DORMANT_SWARM_MIN_INACTIVE_DAYS", 21))
+    dormant_min = int(_cfg("DORMANT_MIN_INACTIVE_DAYS", 21))
 
-    timestamps = await _fetch_timestamps(addr, chain)
+    timestamps = await _fetch_timestamps(addr)
     cls = _classify_from_sigs(
         timestamps=timestamps,
         fresh_max_txs=fresh_max_txs,
@@ -165,13 +145,9 @@ async def classify_wallet(addr: str, db: Session, chain: str = "solana") -> dict
 
     expires = now + timedelta(hours=cache_ttl)
     if cached is None:
-        # Composite PK is single column (wallet_address) — for cross-
-        # chain wallets we'd collide. Distinguish by storing chain;
-        # if a chain conflict happens (same string used on both),
-        # we just overwrite.
-        cached = WalletClassification(wallet_address=cache_key)
+        cached = WalletClassification(wallet_address=addr)
         db.add(cached)
-    cached.chain = chain
+    cached.chain = "solana"
     cached.is_fresh = cls["is_fresh"]
     cached.is_dormant = cls["is_dormant"]
     cached.tx_count_observed = cls["tx_count_observed"]
@@ -190,12 +166,12 @@ async def classify_wallet(addr: str, db: Session, chain: str = "solana") -> dict
 async def classify_many(addrs: list[str], db: Session,
                         concurrency: int = 10,
                         chain: str = "solana") -> dict[str, dict]:
-    """Batch classifier, chain-aware. Returns {addr: classification}."""
+    """Batch classifier. Returns {addr: classification}."""
     sem = asyncio.Semaphore(concurrency)
 
     async def _one(addr: str):
         async with sem:
-            return addr, await classify_wallet(addr, db, chain=chain)
+            return addr, await classify_wallet(addr, db)
 
     pairs = await asyncio.gather(*[_one(a) for a in addrs],
                                  return_exceptions=True)

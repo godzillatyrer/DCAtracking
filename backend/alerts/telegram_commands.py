@@ -149,7 +149,7 @@ async def _cmd_help(args: str) -> str:
         "  /pause — mute all watcher alerts\n"
         "  /resume — re-enable\n"
         "  /cleanup &lt;event_type&gt; — wipe a noisy type\n"
-        "    e.g. <code>/cleanup pump_migration</code>\n"
+        "    e.g. <code>/cleanup cex_accumulation</code>\n"
     )
 
 
@@ -159,15 +159,13 @@ async def _cmd_status(args: str) -> str:
         now = datetime.utcnow()
         # Job ages
         job_names = [
+            "cex_outflow_harvester",
+            "accumulation_alerter",
             "solana_graph_walk",
             "wallet_activity_tracker",
             "wallet_stats_aggregator",
             "alert_outcome_tracker",
-            "hyperliquid_watcher",
-            "freshie_dormant_watcher",
-            "eth_freshie_dormant_watcher",
-            "bsc_freshie_dormant_watcher",
-            "migration_watcher",
+            "dca_order_watcher",
         ]
         lines = []
         for j in job_names:
@@ -347,11 +345,8 @@ async def _cmd_resume(args: str) -> str:
 
 
 _ALLOWED_CLEANUP_TYPES = {
-    "pump_migration",
-    "freshie_swarm", "dormant_swarm",
-    "eth_freshie_swarm", "eth_dormant_swarm",
-    "bsc_freshie_swarm", "bsc_dormant_swarm",
-    "hl_whale_trade",
+    "cex_accumulation",
+    "dca_order",
     "cabal_convergence", "cabal_exit", "sniper_solo",
 }
 

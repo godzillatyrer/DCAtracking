@@ -332,16 +332,14 @@ async def full_health(db: Session = Depends(get_db)):
     """Single-call dashboard health bundle."""
     # Most recent scan log per job
     job_names = [
+        "cex_outflow_harvester",
+        "accumulation_alerter",
         "solana_graph_walk",
         "wallet_activity_tracker",
         "wallet_stats_aggregator",
         "alert_outcome_tracker",
         "behavioral_clusterer",
-        "hyperliquid_watcher",
-        "freshie_dormant_watcher",
-        "eth_freshie_dormant_watcher",
-        "bsc_freshie_dormant_watcher",
-        "migration_watcher",
+        "dca_order_watcher",
     ]
     jobs = []
     now = datetime.utcnow()
