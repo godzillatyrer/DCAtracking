@@ -25,8 +25,9 @@ Everything left is Solana.
   one-shot idempotent migration that widens
   `wallet_funding_edges.tx_hash` to `VARCHAR(128)` (Solana sigs are
   87–88 chars).
-- **Scheduler**: `backend/scheduler.py` — single job,
-  `solana_graph_walk` at 15-min interval, under a
+- **Scheduler**: `backend/scheduler.py` — 12 jobs including
+  `solana_graph_walk` (15 min), `dca_order_watcher` (3 min),
+  `wallet_activity_tracker` (5 min), etc., under a
   `MAX_CONCURRENT_JOBS=2` semaphore + 8-min hard timeout.
 - **Extractor**: `backend/detection/cabal_extractor.py`
   - Price resolution: GeckoTerminal → DexScreener → Birdeye
@@ -38,6 +39,14 @@ Everything left is Solana.
     cross-confirmation then `max(realized, balance, total_profit)`
 - **Graph walk**: `backend/detection/solana_graph_walk.py` — inserts
   into `wallet_funding_edges`; depth-limited to 2.
+- **DCA Order Watcher**: `backend/anomaly/dca_order_watcher.py` —
+  monitors the Jupiter DCA program (`DCA265Vj8a9CEuX1eb1LWRnDT7uK6q1xMipnNyatn23M`)
+  for `openDca`/`openDcaV2` instructions. Parses Anchor instruction
+  data (discriminator + args) to extract DCA size, input/output mints,
+  and cycle schedule. Filters for large orders ($150K+) on tokens
+  under $50M mcap. Classifies the wallet (fresh/dormant) and checks
+  if it was funded from a known CEX address. Fires via
+  `fire_dca_order_alert`. Runs every 3 minutes.
 - **Models**: `Alert`, `ScanLog`, `SolanaKnownWallet`,
   `SolanaWalletActivity`, `WalletFundingEdge`.
 - **Clients**: `helius`, `gmgn`, `birdeye`, `defillama`,
@@ -88,9 +97,9 @@ Set `DCATRACKING_URL` to the deployed URL. Exit codes: 0 healthy,
 
 ## Known good silence
 
-- `HELIUS_API_KEY` unset → `solana_graph_walk` logs and skips. Expected
-  if the user hasn't seeded a Helius key; don't "fix" by wiring
-  another RPC.
+- `HELIUS_API_KEY` unset → `solana_graph_walk` and `dca_order_watcher`
+  log and skip. Expected if the user hasn't seeded a Helius key;
+  don't "fix" by wiring another RPC.
 - GMGN returning `gmgn_top_traders_count: 0` / `gmgn_top_holders_count: 0`
   on brand-new pump.fun tokens — GMGN often hasn't indexed them yet.
   Extractor falls back to Helius tx history; that's the design.

@@ -846,3 +846,150 @@ async def fire_cabal_alert(event: dict, db: Session | None = None) -> int | None
         if close_db:
             db.close()
     return alert.id
+
+
+# ─── Jupiter DCA order alert ────────────────────────────────────────
+
+def _format_cycle_freq(seconds: int) -> str:
+    if seconds <= 0:
+        return "unknown"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        h = seconds / 3600
+        return f"{h:.1f}h" if h != int(h) else f"{int(h)}h"
+    d = seconds / 86400
+    return f"{d:.1f}d" if d != int(d) else f"{int(d)}d"
+
+
+def _format_dca_order(event: dict) -> str:
+    mint = event["mint"]
+    symbol = event.get("symbol") or ""
+    name = event.get("name") or ""
+    mkt = event.get("market") or {}
+    wallet = event.get("user_wallet") or ""
+    input_token = event.get("input_token") or "SOL"
+    value_usd = event.get("dca_value_usd") or 0
+    dca_amount = event.get("dca_amount") or 0
+    per_cycle = event.get("per_cycle") or 0
+    num_cycles = event.get("num_cycles") or 0
+    cycle_freq = event.get("cycle_freq_sec") or 0
+
+    title_label = symbol or _short(mint)
+    title = f"💰 <b>Large DCA order</b> · {title_label}"
+    if name and name != symbol:
+        title += f" <i>({name})</i>"
+
+    market_lines = []
+    if mkt.get("market_cap_usd"):
+        market_lines.append(f"<b>MC:</b> {_fmt_usd(mkt['market_cap_usd'])}")
+    if mkt.get("liquidity_usd"):
+        market_lines.append(f"<b>Liq:</b> {_fmt_usd(mkt['liquidity_usd'])}")
+    if mkt.get("price_usd"):
+        price = mkt["price_usd"]
+        price_str = (
+            f"${price:.8f}" if price < 0.01
+            else f"${price:.6f}" if price < 1
+            else f"${price:,.4f}"
+        )
+        market_lines.append(f"<b>Px:</b> {price_str}")
+    market_line = " · ".join(market_lines) if market_lines else "<i>no pair data yet</i>"
+
+    dca_lines = [f"<b>DCA size:</b> {_fmt_usd(value_usd)} ({dca_amount:,.2f} {input_token})"]
+    if per_cycle and num_cycles and cycle_freq:
+        freq_str = _format_cycle_freq(cycle_freq)
+        dca_lines.append(
+            f"<b>Schedule:</b> {per_cycle:,.2f} {input_token} × "
+            f"{num_cycles} cycles, every {freq_str}"
+        )
+    dca_lines.append(f"<b>Flow:</b> {input_token} → {title_label}")
+
+    wallet_lines = [f"<b>Wallet:</b> <code>{_short(wallet)}</code>"]
+    is_fresh = event.get("is_fresh")
+    is_dormant = event.get("is_dormant")
+    tx_count = event.get("tx_count", 0)
+    if is_fresh:
+        wallet_lines.append(f"  🆕 Fresh wallet ({tx_count} txs)")
+    elif is_dormant:
+        wallet_lines.append(f"  😴 Dormant wallet woke up ({tx_count} txs)")
+    else:
+        wallet_lines.append(f"  ({tx_count} txs)")
+
+    if event.get("cex_funded"):
+        cex_label = event.get("cex_label") or "CEX"
+        cex_sol = event.get("cex_amount_sol") or 0
+        wallet_lines.append(
+            f"  💎 <b>CEX-funded:</b> {cex_label}"
+            + (f" — {cex_sol:,.1f} SOL" if cex_sol else "")
+        )
+
+    return (
+        f"{title}\n\n"
+        f"<b>CA:</b> <code>{mint}</code>\n"
+        f"{market_line}\n\n"
+        + "\n".join(dca_lines)
+        + "\n\n"
+        + "\n".join(wallet_lines)
+        + f"\n\n"
+        f'<a href="https://dexscreener.com/solana/{mint}">DEX Screener</a> · '
+        f'<a href="https://gmgn.ai/sol/token/{mint}">GMGN</a> · '
+        f'<a href="https://solscan.io/account/{wallet}">Wallet</a> · '
+        f'<a href="https://solscan.io/tx/{event.get("signature", "")}">Tx</a>'
+    )
+
+
+async def fire_dca_order_alert(
+    event: dict, db: Session | None = None,
+) -> int | None:
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+
+    mint = event["mint"]
+    symbol = event.get("symbol")
+    mkt = event.get("market") or {}
+    value_usd = event.get("dca_value_usd") or 0
+    cex_tag = f" (CEX-funded: {event['cex_label']})" if event.get("cex_funded") else ""
+    fresh_tag = " (fresh wallet)" if event.get("is_fresh") else ""
+    reason = (
+        f"Jupiter DCA {_fmt_usd(value_usd)} on "
+        f"{symbol or mint[:8]}{fresh_tag}{cex_tag}"
+    )
+
+    try:
+        alert = Alert(
+            contract_address=mint,
+            token_symbol=(symbol[:128] if symbol else None),
+            alert_type="dca_order",
+            trigger_reason=reason,
+            mc_at_alert=mkt.get("market_cap_usd") or None,
+            price_at_alert=mkt.get("price_usd") or None,
+            telegram_sent=False,
+            fired_at=datetime.utcnow(),
+        )
+        db.add(alert)
+        db.commit()
+    except Exception as e:
+        logger.error(f"fire_dca_order_alert: Alert INSERT failed: {e}")
+        try:
+            db.rollback()
+        finally:
+            if close_db:
+                db.close()
+        return None
+
+    try:
+        msg_id = await send_telegram_message(_format_dca_order(event))
+        if msg_id is not None:
+            alert.telegram_sent = True
+            alert.telegram_message_id = msg_id
+            db.commit()
+    except Exception as e:
+        logger.error(f"fire_dca_order_alert: Telegram send failed: {e}")
+    finally:
+        if close_db:
+            db.close()
+    return alert.id

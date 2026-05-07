@@ -18,6 +18,7 @@ from backend.alerts.telegram_commands import run_telegram_command_poller
 from backend.anomaly.evm_freshie_dormant_watcher import (
     run_bsc_freshie_dormant_watcher, run_eth_freshie_dormant_watcher,
 )
+from backend.anomaly.dca_order_watcher import run_dca_order_watcher
 from backend.anomaly.freshie_dormant_watcher import run_freshie_dormant_watcher
 from backend.anomaly.hyperliquid_watcher import run_hyperliquid_watcher
 from backend.anomaly.migration_watcher import run_migration_watcher
@@ -219,6 +220,19 @@ async def run_bsc_freshie_dormant_job():
                  started_at=started, finished_at=datetime.utcnow())
 
 
+async def run_dca_order_watcher_job():
+    started = datetime.utcnow()
+    try:
+        result = await run_dca_order_watcher()
+        log_scan("dca_order_watcher", "success",
+                 details=str(result) if result else "ok",
+                 started_at=started, finished_at=datetime.utcnow())
+    except Exception as e:
+        logger.error(f"dca_order_watcher failed: {e}")
+        log_scan("dca_order_watcher", "error", error_message=str(e),
+                 started_at=started, finished_at=datetime.utcnow())
+
+
 async def run_telegram_command_poller_job():
     """Polls Telegram /getUpdates for inbound bot commands. Runs much
     more often than the watchers (10s) so user commands feel snappy."""
@@ -304,6 +318,13 @@ def setup_scheduler() -> AsyncIOScheduler:
         id="bsc_freshie_dormant_watcher", name="BSC Freshie/Dormant Swarm",
         minutes=5,
         next_run_time=now + timedelta(seconds=75),
+    )
+    scheduler.add_job(
+        _wrap_throttled(run_dca_order_watcher_job, "dca_order_watcher"),
+        "interval",
+        id="dca_order_watcher", name="Jupiter DCA Order Watcher",
+        minutes=3,
+        next_run_time=now + timedelta(seconds=90),
     )
     # Telegram command poller — short interval, NOT wrapped in
     # _wrap_throttled because we want it lightweight + always on. The

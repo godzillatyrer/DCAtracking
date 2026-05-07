@@ -147,6 +147,18 @@ DEFAULTS: list[tuple[str, str, Any, str, str]] = [
     ("_LAST_TG_UPDATE_ID", "_internal", 0, "int",
      "Internal: last Telegram update_id processed by the command poller."),
 
+    # Jupiter DCA order watcher
+    ("DCA_ORDER_ENABLED", "dca", True, "bool",
+     "Master switch for Jupiter DCA large-order alerts. Monitors the Jupiter DCA program for openDca/openDcaV2 instructions above the value threshold on low-cap tokens."),
+    ("DCA_ORDER_MIN_VALUE_USD", "dca", 150_000.0, "float",
+     "Minimum total DCA order value (USD) to trigger an alert. Only orders above this fire."),
+    ("DCA_ORDER_MAX_MC_USD", "dca", 50_000_000.0, "float",
+     "Only alert on tokens with market cap below this (USD). Tokens with no pair data always pass."),
+    ("DCA_ORDER_DEDUP_HOURS", "dca", 24, "int",
+     "Per-mint dedup window for DCA order alerts. Same output token won't re-alert within this window."),
+    ("DCA_ORDER_MAX_ALERTS_PER_HOUR", "dca", 3, "int",
+     "Hourly cap on DCA order alerts to Telegram."),
+
     # Pump.fun migration tracker
     ("MIGRATION_TRACKER_ENABLED", "migration", False, "bool",
      "Master switch for pump.fun graduation alerts. Default OFF — pump.fun graduates many coins per hour, only enable if you specifically want this firehose."),
