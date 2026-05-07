@@ -94,10 +94,15 @@ async def run_hyperliquid_watcher() -> dict:
     if not _cfg("HL_ENABLED", True):
         return {"skipped": "disabled"}
 
-    threshold = float(_cfg("HL_MIN_NOTIONAL_USD", 1_000_000))
+    whale_threshold = float(_cfg("HL_MIN_NOTIONAL_USD", 1_000_000))
+    fresh_threshold = float(_cfg("HL_FRESH_MIN_NOTIONAL_USD", 50_000))
     fresh_max = int(_cfg("HL_FRESH_WALLET_MAX_FILLS", 5))
     dedup_min = int(_cfg("HL_DEDUP_WINDOW_MIN", 30))
     hourly_cap = int(_cfg("HL_MAX_ALERTS_PER_HOUR", 8))
+
+    # Use the lower of the two thresholds as the initial filter so
+    # fresh-wallet trades aren't discarded before classification.
+    floor_threshold = min(whale_threshold, fresh_threshold)
 
     universe, ctxs = await hyperliquid.meta_and_ctxs()
     if not universe:
@@ -137,9 +142,6 @@ async def run_hyperliquid_watcher() -> dict:
             *[_fetch(c) for c in coins_to_check], return_exceptions=True
         )
 
-        # Pull existing tx hashes for THIS source so we can dedup the
-        # raw event log cheaply (separate from alert dedup).
-        # Limit to recent to keep the lookup small.
         since_anom = datetime.utcnow() - timedelta(hours=2)
         existing_hashes: set[str] = {
             r[0] for r in db.query(ChainAnomaly.tx_hash)
@@ -148,10 +150,10 @@ async def run_hyperliquid_watcher() -> dict:
             .all()
         }
 
-        # First pass: persist all new whale candidates as ChainAnomaly
-        # rows so the dashboard/feed has them even if the alert is
-        # deduped or capped.
-        candidates: list[dict] = []
+        # First pass: collect all trades above the floor threshold.
+        # We classify fresh/whale AFTER collecting, then filter out
+        # trades that are too small for non-fresh wallets.
+        raw_candidates: list[dict] = []
         for result in results:
             if isinstance(result, Exception):
                 continue
@@ -165,7 +167,7 @@ async def run_hyperliquid_watcher() -> dict:
                     if px <= 0 or sz <= 0:
                         continue
                     notional = px * sz
-                    if notional < threshold:
+                    if notional < floor_threshold:
                         continue
                     h = t.get("hash") or ""
                     if not h or h in existing_hashes:
@@ -175,7 +177,7 @@ async def run_hyperliquid_watcher() -> dict:
                     users = t.get("users") or []
                     actor = users[0] if users else None
                     counterparty = users[1] if len(users) > 1 else None
-                    candidates.append({
+                    raw_candidates.append({
                         "coin": coin, "side": side, "side_raw": side_raw,
                         "px": px, "sz": sz, "notional": notional,
                         "hash": h, "time_ms": t.get("time"),
@@ -185,11 +187,12 @@ async def run_hyperliquid_watcher() -> dict:
                 except Exception as e:
                     logger.warning(f"HL trade parse error on {coin}: {e}")
 
-        if not candidates:
+        if not raw_candidates:
             return {"checked": len(coins_to_check), "candidates": 0}
 
-        # Look up fill counts for the actor wallets (cached, parallel)
-        actor_addrs = list({c["actor"] for c in candidates if c["actor"]})
+        # Classify actors BEFORE filtering — this lets fresh wallets
+        # pass at the lower threshold.
+        actor_addrs = list({c["actor"] for c in raw_candidates if c["actor"]})
 
         async def _bounded(addr):
             async with sem:
@@ -201,22 +204,34 @@ async def run_hyperliquid_watcher() -> dict:
             r[0]: r[1] for r in addr_counts if not isinstance(r, Exception)
         }
 
+        # Second pass: apply the two-tier threshold.
+        #   Fresh wallets (≤ fresh_max fills): keep if >= fresh_threshold
+        #   Normal wallets: keep if >= whale_threshold
+        candidates: list[dict] = []
+        for c in raw_candidates:
+            actor = c["actor"]
+            fill_count = count_by_addr.get(actor, 0)
+            is_fresh = fill_count <= fresh_max
+            c["is_fresh"] = is_fresh
+            c["fill_count"] = fill_count
+            if is_fresh and c["notional"] >= fresh_threshold:
+                candidates.append(c)
+            elif c["notional"] >= whale_threshold:
+                candidates.append(c)
+
         # Persist anomalies
         for c in candidates:
             try:
-                actor = c["actor"]
-                fill_count = count_by_addr.get(actor, 0)
-                is_fresh = fill_count <= fresh_max
                 anomaly = ChainAnomaly(
                     source="hyperliquid",
                     event_type="whale_trade",
                     coin=c["coin"], side=c["side"],
                     notional_usd=Decimal(str(round(c["notional"], 2))),
                     px=Decimal(str(c["px"])), sz=Decimal(str(c["sz"])),
-                    actor_address=actor,
+                    actor_address=c["actor"],
                     counterparty_address=c["counterparty"],
-                    is_fresh_wallet=is_fresh,
-                    actor_history_count=fill_count,
+                    is_fresh_wallet=c["is_fresh"],
+                    actor_history_count=c["fill_count"],
                     tx_hash=c["hash"],
                     extra_json=json.dumps({
                         "side_raw": c["side_raw"], "time_ms": c["time_ms"],
@@ -229,16 +244,14 @@ async def run_hyperliquid_watcher() -> dict:
                 db.add(anomaly)
                 db.commit()
                 new_anomalies += 1
-                c["is_fresh"] = is_fresh
-                c["fill_count"] = fill_count
                 c["anomaly_id"] = anomaly.id
             except Exception as e:
                 db.rollback()
                 logger.error(f"HL anomaly persist error: {e}")
 
-        # Alert dispatch — apply per-(coin,side) dedup + hourly cap.
-        # Sort by notional desc so the biggest ones get the budget.
-        candidates.sort(key=lambda c: -c["notional"])
+        # Alert dispatch — fresh-wallet trades first (higher signal),
+        # then whales by notional. Per-(coin,side) dedup + hourly cap.
+        candidates.sort(key=lambda c: (-int(c.get("is_fresh", False)), -c["notional"]))
         already_keys = _recently_alerted_keys(db, dedup_min)
         budget = max(0, hourly_cap - _alerts_sent_last_hour(db))
 
@@ -266,7 +279,6 @@ async def run_hyperliquid_watcher() -> dict:
                 fired += 1
                 budget -= 1
                 already_keys.add(key)
-                # Link the anomaly to the alert
                 try:
                     anom = db.query(ChainAnomaly).filter_by(
                         id=c.get("anomaly_id")
@@ -280,12 +292,14 @@ async def run_hyperliquid_watcher() -> dict:
 
         if new_anomalies or fired:
             logger.info(
-                f"hyperliquid_watcher: {new_anomalies} new whale anomalies, "
-                f"{fired} alerts fired (budget left {budget})"
+                f"hyperliquid_watcher: {new_anomalies} anomalies, "
+                f"{fired} alerts (fresh threshold ${fresh_threshold:,.0f}, "
+                f"whale threshold ${whale_threshold:,.0f})"
             )
         return {
             "checked_coins": len(coins_to_check),
-            "candidates": len(candidates),
+            "raw_above_floor": len(raw_candidates),
+            "qualified_candidates": len(candidates),
             "new_anomalies": new_anomalies,
             "alerts_fired": fired,
         }
