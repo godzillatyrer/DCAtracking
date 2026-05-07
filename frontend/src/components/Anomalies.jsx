@@ -27,13 +27,9 @@ function sideBadge(side) {
   return { bg: colors.bgSubtle, color: colors.textFaint, label: side?.toUpperCase() || '—' };
 }
 
-function AddrLink({ address, source, children }) {
+function AddrLink({ address, children }) {
   if (!address) return children || '—';
-  let href;
-  if (source === 'hyperliquid') href = `https://app.hyperliquid.xyz/explorer/address/${address}`;
-  else if (source === 'eth') href = `https://etherscan.io/address/${address}`;
-  else if (source === 'bsc') href = `https://bscscan.com/address/${address}`;
-  else href = `https://solscan.io/account/${address}`;
+  const href = `https://solscan.io/account/${address}`;
   return (
     <a href={href} target="_blank" rel="noreferrer"
        style={{
@@ -43,27 +39,16 @@ function AddrLink({ address, source, children }) {
   );
 }
 
-function CoinLink({ source, coin }) {
+function CoinLink({ coin }) {
   if (!coin) return '—';
-  if (source === 'hyperliquid') {
-    return (
-      <a href={`https://app.hyperliquid.xyz/trade/${coin}`}
-         target="_blank" rel="noreferrer"
-         style={{ color: colors.text, fontWeight: typography.semibold, textDecoration: 'none' }}>
-        {coin}
-      </a>
-    );
-  }
   return <span style={{ color: colors.text, fontWeight: typography.semibold }}>{coin}</span>;
 }
 
 function eventTypeBadge(t) {
   switch (t) {
-    case 'whale_trade':    return { bg: '#cfe9ff', color: '#0066ff', label: 'WHALE' };
-    case 'freshie_swarm':  return { bg: '#dcffe4', color: '#1f8a3a', label: '👶 FRESHIE' };
-    case 'dormant_swarm':  return { bg: '#fff3cf', color: '#9a6b00', label: '😴 DORMANT' };
-    case 'pump_migration': return { bg: '#e9deff', color: '#5e2ec9', label: '🎓 MIGRATION' };
-    default:               return { bg: '#efeff2', color: '#6e6e73', label: (t || '—').toUpperCase() };
+    case 'cex_accumulation': return { bg: '#dcffe4', color: '#1f8a3a', label: '💎 CEX-FUNDED' };
+    case 'dca_order':        return { bg: '#cfe9ff', color: '#0066ff', label: '💰 DCA' };
+    default:                 return { bg: '#efeff2', color: '#6e6e73', label: (t || '—').toUpperCase() };
   }
 }
 
@@ -118,9 +103,8 @@ function Anomalies() {
     <div>
       <h1 style={pageTitle}>Anomalies</h1>
       <div style={pageSubtitle}>
-        Real-time on-chain whale events from external watchers. Currently
-        Hyperliquid; Solana DEX whale swaps and EVM whale flows arrive next.
-        Auto-refresh 30s.
+        Solana on-chain anomalies — CEX-funded accumulation events and Jupiter
+        DCA insider orders. Auto-refresh 30s.
       </div>
 
       <div style={{
@@ -134,7 +118,7 @@ function Anomalies() {
           }}>Source</div>
           <SourceFilter
             value={source} onChange={setSource}
-            sources={['hyperliquid', 'solana', 'eth', 'bsc']}
+            sources={['solana', 'jupiter_dca']}
           />
         </div>
         <button
@@ -160,9 +144,9 @@ function Anomalies() {
           </div>
         ) : items.length === 0 ? (
           <div style={{ padding: '48px 16px', textAlign: 'center', color: colors.textFaint }}>
-            Nothing yet. Hyperliquid watcher polls every minute — once a
-            whale trade ≥ the threshold lands on a non-major coin, it'll
-            show here.
+            Nothing yet. The CEX outflow harvester polls hot wallets every 10
+            min and the accumulation alerter every 20 min — events appear here
+            once a wallet group crosses the configured supply-% threshold.
           </div>
         ) : (
           <div style={{ maxHeight: 720, overflowY: 'auto' }}>
@@ -199,7 +183,7 @@ function Anomalies() {
                         }}>{tb.label}</span>
                       </td>
                       <td style={td}>
-                        <CoinLink source={a.source} coin={a.coin} />
+                        <CoinLink coin={a.coin} />
                       </td>
                       <td style={td}>
                         <span style={{
@@ -211,7 +195,7 @@ function Anomalies() {
                         {fmtUsd(a.notional_usd)}
                       </td>
                       <td style={td}>
-                        <AddrLink address={a.actor_address} source={a.source}>
+                        <AddrLink address={a.actor_address}>
                           {a.actor_short}
                         </AddrLink>
                       </td>
