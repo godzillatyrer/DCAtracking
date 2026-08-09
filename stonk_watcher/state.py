@@ -28,6 +28,7 @@ def _default_state() -> Dict[str, Any]:
         # Track 3
         "frontend": {
             "deployment_id": None,
+            "baselined": False,           # first run records silently
             "seen_addresses": [],
             "negative_cache": [],         # addresses that 404 on Blockscout
         },

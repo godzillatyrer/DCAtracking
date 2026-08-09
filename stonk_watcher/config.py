@@ -120,10 +120,18 @@ AMM_FACTORY_START_BLOCK = env_int("AMM_FACTORY_START_BLOCK", 29738000)
 # eth_getLogs chunk size (halved automatically on range errors).
 LOG_CHUNK_SIZE = env_int("LOG_CHUNK_SIZE", 2000)
 
-# Known-boring addresses ignored by the frontend differ.
+# Known-boring addresses ignored by the frontend differ. These are universal
+# infrastructure deployed at the same address on every chain — their presence
+# in a site bundle says nothing about a launch.
 BORING_ADDRESSES = {
-    "0x0000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000",  # zero address
+    "0x000000000000000000000000000000000000dead",  # burn address
     "0xca11bde05977b3631167028862be2a173976ca11",  # multicall3
+    "0x0000000071727de22e5e9d8baf0edac6f37da032",  # ERC-4337 EntryPoint v0.7
+    "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",  # ERC-4337 EntryPoint v0.6
+    "0x000000000022d473030f116ddee9f6b43ac78ba3",  # Permit2
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c",  # deterministic deployer
+    "0x00000000000000adc04c56bf30ac9d3c0aaf14dc",  # Seaport 1.5
 }
 
 # --- Alert channels ---------------------------------------------------------

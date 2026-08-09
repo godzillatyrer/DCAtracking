@@ -12,7 +12,7 @@ from typing import List, Optional, Set
 import requests
 
 from . import config
-from .alerts import AlertPipeline, ErrorReporter
+from .alerts import AlertPipeline, ErrorReporter, is_target_token
 from .blockscout import BlockscoutClient
 from .state import State
 
@@ -98,6 +98,25 @@ class FrontendDiffer:
 
         seen = set(fstate["seen_addresses"])
         negative = set(fstate["negative_cache"])
+
+        # First run: record everything the bundle already contains WITHOUT
+        # alerting. The signal here is an address that appears *after* we
+        # start watching; on a cold start every pre-existing RWA/stock token,
+        # WETH and piece of infra would otherwise be reported as "new" and
+        # bury the launch alert. Mirrors the dev-wallet baseline.
+        if not fstate.get("baselined"):
+            fstate["seen_addresses"] = sorted(seen | found)
+            fstate["baselined"] = True
+            self.state.mark_dirty()
+            self.state.save_if_dirty()
+            log.info("baselined %d frontend addresses", len(found))
+            self.pipeline.send(
+                f"FRONTEND BASELINED\n{len(found)} addresses already in the "
+                "launcher bundle recorded as pre-existing (RWA/stock tokens, "
+                "WETH, infra). Only addresses that appear from now on will "
+                "alert.", level="info")
+            return
+
         new_addresses = sorted(found - seen - negative - config.BORING_ADDRESSES)
 
         checked = 0
@@ -124,12 +143,22 @@ class FrontendDiffer:
             self.state.mark_dirty()
             if info["is_contract"]:
                 token = info.get("token") or {}
-                token_line = ""
-                if token:
-                    token_line = (f"\ntoken: {token.get('name', '?')} "
-                                  f"({token.get('symbol', '?')})")
+                name = str(token.get("name") or "?")
+                symbol = str(token.get("symbol") or "?")
+                if token and not is_target_token(name, symbol):
+                    # An existing token added to the site is ordinary listing
+                    # churn — Tracks 1 and 2 own token discovery. Keep it on
+                    # the record, but silently: the factory we're hunting is
+                    # NOT a token, so an untyped contract is the real signal.
+                    self.pipeline.send(
+                        f"new token listed on site: {name} ({symbol})\n{addr}",
+                        level="info")
+                    continue
+                token_line = f"\ntoken: {name} ({symbol})" if token else ""
+                headline = ("*** CLOCKIN *** IN FRONTEND BUNDLE"
+                            if token else "NEW CONTRACT IN FRONTEND")
                 self.pipeline.send(
-                    f"NEW CONTRACT IN FRONTEND\n{addr}{token_line}\n"
+                    f"{headline}\n{addr}{token_line}\n"
                     f"contract: {config.BLOCKSCOUT_ADDRESS_URL.format(addr=addr)}\n"
                     f"site: {config.LAUNCHER_PAGE_URL}\n"
                     "Possible factory / launch infra — appeared in the site "
