@@ -13,6 +13,8 @@ from . import config
 
 _LOCK = threading.RLock()
 
+SCHEMA_VERSION = 2
+
 
 def _default_state() -> Dict[str, Any]:
     return {
@@ -32,7 +34,7 @@ def _default_state() -> Dict[str, Any]:
             "seen_addresses": [],
             "negative_cache": [],         # addresses that 404 on Blockscout
         },
-        "meta": {"created_at": time.time()},
+        "meta": {"created_at": time.time(), "schema": SCHEMA_VERSION},
     }
 
 
@@ -65,6 +67,32 @@ class State:
                 merged.update(loaded.get(key) or {})
                 base[key] = merged
             self.data = base
+            self._migrate()
+
+    SCHEMA_VERSION = SCHEMA_VERSION  # class alias for callers/tests
+
+    def _migrate(self) -> None:
+        """One-time cleanups for state written by earlier versions."""
+        meta = self.data.setdefault("meta", {})
+        if meta.get("schema", 1) >= self.SCHEMA_VERSION:
+            return
+        # v2: the chain-wide mint watch was removed. Tokens it tracked
+        # (source "mint") are NOT launchpad tokens, and any factory armed
+        # before per-entry provenance existed can only have been learned
+        # from them — generic memecoin factories, not the Stonk Launcher.
+        # Purge both so only launchpad provenance remains. Legitimate
+        # factories re-arm on their own: WATCH_CONTRACTS entries every
+        # cycle, API-derived ones as soon as the launcher API lists tokens.
+        tracked = self.data.get("tracked", {})
+        for ca in [c for c, i in tracked.items() if i.get("source") == "mint"]:
+            del tracked[ca]
+        factories = self.data.get("candidate_factories", {})
+        for addr in [a for a, f in factories.items() if "source" not in f]:
+            del factories[addr]
+        for stale_key in ("mint_last_scanned", "mint_seen_tokens"):
+            self.data.pop(stale_key, None)
+        meta["schema"] = self.SCHEMA_VERSION
+        self.mark_dirty()
 
     def save(self) -> None:
         with _LOCK:
@@ -120,7 +148,13 @@ class State:
             return self.data["dev_wallets"][key]
 
     # -- candidate factories -------------------------------------------------
-    def add_candidate_factory(self, addr: str, deploy_block: int) -> bool:
+    def add_candidate_factory(self, addr: str, deploy_block: int,
+                              source: str = "unknown") -> bool:
+        """source records the provenance that justified arming this factory:
+        "team_wallet" (watched wallet deployed it), "config"
+        (WATCH_CONTRACTS), or "learned_from_api" (creator of an API-listed
+        launchpad token). Anything armed without a recorded source is
+        untrusted and purged by migration."""
         with _LOCK:
             key = addr.lower()
             if key in self.data["candidate_factories"]:
@@ -131,6 +165,7 @@ class State:
                 "learned_topic0": None,
                 "confirmed_tokens": [],
                 "seen_log_keys": [],
+                "source": source,
             }
             self.mark_dirty()
             return True

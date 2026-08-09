@@ -90,7 +90,8 @@ class ChainWatcher:
 
     def on_contract_creation(self, wallet: str, contract: str, block: int,
                              tx_link: str) -> None:
-        added = self.state.add_candidate_factory(contract, block)
+        added = self.state.add_candidate_factory(contract, block,
+                                                 source="team_wallet")
         self.pipeline.send(
             f"TEAM WALLET DEPLOYED A CONTRACT — possible Stonk Launcher factory\n"
             f"{contract}\nwallet: {wallet}\ndeploy block: {block}\n"
@@ -229,7 +230,7 @@ class ChainWatcher:
             if addr.lower() in self.state.candidate_factories():
                 continue
             start = max(0, head - config.WATCH_CONTRACTS_LOOKBACK)
-            self.state.add_candidate_factory(addr, start)
+            self.state.add_candidate_factory(addr, start, source="config")
             log.info("armed configured contract %s from block %d", addr, start)
             self.pipeline.send(
                 f"NOW WATCHING CONFIGURED CONTRACT\n{addr}\n"
@@ -248,6 +249,13 @@ class ChainWatcher:
         from the factory's own logs, ahead of the API.
         """
         for ca, info in list(self.state.data["tracked"].items()):
+            # Provenance gate: ONLY a token the launcher API itself listed
+            # proves its creator is the launcher factory. Tokens tracked from
+            # any other source (chain scans, historical state) must never
+            # teach us a factory — that is how generic memecoin factories
+            # ended up armed and spamming.
+            if info.get("source") != "api":
+                continue
             if info.get("creator_resolved"):
                 continue
             try:
@@ -277,7 +285,8 @@ class ChainWatcher:
             block = creation.get("block")
             if not isinstance(block, int):
                 block = max(0, head - config.WATCH_CONTRACTS_LOOKBACK)
-            self.state.add_candidate_factory(creator, block)
+            self.state.add_candidate_factory(creator, block,
+                                             source="learned_from_api")
             log.info("learned launcher factory %s from token %s", creator, ca)
             self.pipeline.send(
                 f"LEARNED LAUNCHER FACTORY\n{creator}\n"
