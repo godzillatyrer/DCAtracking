@@ -161,6 +161,21 @@ doesn't depend on the watcher's own Telegram path being healthy.
 It deliberately reports **counts only, never contract addresses** — a Render
 web service URL is public, and the CA is the entire edge.
 
+### What to enter for the optional variables
+
+Render's blueprint form prompts for four values. Only the two Telegram ones
+matter:
+
+| Key | What to enter |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | **Required.** From @BotFather. |
+| `TELEGRAM_CHAT_ID` | **Required.** From `getUpdates`. |
+| `RPC_URL` | `https://rpc.mainnet.chain.robinhood.com` — the official Robinhood Chain mainnet RPC (chain ID 4663). Shared and rate limited; a dedicated provider endpoint is better if you have one. Blank falls back to the Blockscout proxy. |
+| `AMM_FACTORY_ADDRESS` | **Leave blank.** Optional; only enables LP/market-event alerts on already-tracked tokens and has no effect on capturing the CLOCKIN CA. A wrong address is worse than an empty one. |
+
+Blank values are treated as unset, so leaving an optional field empty falls
+back to the documented default rather than overriding it with `""`.
+
 ### Render caveats worth knowing before launch night
 
 - **Auto-deploy is on** (`autoDeployTrigger: commit`). A push to the deployed

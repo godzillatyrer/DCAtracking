@@ -31,7 +31,22 @@ _load_dotenv()
 
 
 def env(key: str, default: str = "") -> str:
-    return os.environ.get(key, default)
+    """Read an env var, treating blank/whitespace-only as absent.
+
+    Hosting dashboards (Render's blueprint form among them) create the
+    variable with an empty value when you leave an optional field blank, so a
+    plain os.environ.get(key, default) would return "" and silently discard
+    the default — e.g. blanking RPC_URL would point the RPC client at an
+    empty URL and kill on-chain detection with no obvious cause.
+
+    Values are stripped because those dashboard fields are textareas: a
+    pasted bot token can carry a trailing newline, which would otherwise be
+    baked straight into the Telegram API URL.
+    """
+    value = os.environ.get(key)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
 
 
 def env_bool(key: str, default: bool = False) -> bool:
