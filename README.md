@@ -13,7 +13,38 @@ blasts it to Telegram (and optionally Twilio SMS / macOS popups).
 |---|---|---|
 | 1. API sniper | `stonkbrokers.cash/api/launcher/tokens` + `/highlights`; new CAs get the detail endpoint called and are auto-tracked | 10s → 5s (last 24h) → **2s in the war room** (1h before → 2h after T0) → 10s |
 | 2. On-chain | Team wallets `0xb668…7CDa` and `0xBe49…8215`: outgoing txs alert, contract creations are auto-armed as **candidate factories** and scanned topic-agnostically with chunked `eth_getLogs`; token addresses are extracted from indexed topics and confirmed via Blockscout | 20s → **5s in the war room** |
+| 2d. Chain-wide mint watch | **Every ERC-20 mint on Robinhood Chain**, regardless of which factory produced it | same as track 2 |
 | 3. Frontend diff | The launcher page + its `/_next/static/chunks/*.js` bundles, diffed for new contract addresses and Vercel redeploys | hourly |
+
+### Why the chain-wide mint watch exists
+
+Tracks 1 and 2 both rest on an assumption. Track 1 assumes the token shows up
+in the launcher API. Track 2 assumes the launcher factory is deployed by one
+of the two known team wallets — if the team deploys it from a fresh wallet,
+or it already exists, nothing arms and that path stays silent.
+
+A **mint is unavoidable**. A token cannot be distributed without a
+`Transfer` from the zero address, so Track 2d watches for exactly that across
+the entire chain and confirms each new contract via Blockscout. It doesn't
+need to know the factory, the deployer, or the API schema. That makes it the
+path that holds when the others' assumptions don't.
+
+The remaining edge: a token that assigns balances in its constructor without
+emitting `Transfer` would be missed. That violates the ERC-20 spec and
+OpenZeppelin's `_mint` always emits, so it's unlikely — and Tracks 1 and 2
+still cover it.
+
+NFT mints are filtered out (constant background noise on this chain) unless
+the name or symbol matches the target. Set `MINT_WATCH=0` to disable.
+
+### If you learn the factory address early
+
+Put it in `WATCH_CONTRACTS` (comma-separated) and the watcher scans all of
+its logs topic-agnostically from the next cycle — no restart, no code change:
+
+```
+WATCH_CONTRACTS=0xTheFactoryAddress
+```
 
 Any confirmed token whose name/symbol matches **CLOCKIN** (case-insensitive)
 fires the loud `*** CLOCKIN ***` alert on every channel simultaneously —
