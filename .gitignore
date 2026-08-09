@@ -1,26 +1,6 @@
-# Environment
 .env
-venv/
+data/
 __pycache__/
 *.pyc
-*.pyo
-
-# IDE
-.vscode/
-.idea/
-
-# Node
-node_modules/
-frontend/build/
-frontend/dist/
-
-# Database
-*.db
-*.sqlite3
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Alembic
-alembic/__pycache__/
+.pytest_cache/
+*.log
