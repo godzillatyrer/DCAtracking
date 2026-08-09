@@ -21,10 +21,17 @@ from .state import State
 log = logging.getLogger("api_poller")
 
 ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
-CA_KEYS = ("address", "ca", "contract", "contract_address", "contractAddress",
-           "token_address", "tokenAddress", "id")
+# Verified against the live launcher bundle: the entry shape is
+# response.tokens[i].token — a top-level "token" field holding the address.
+# NOT "address"/"ca"/"contractAddress". The single-token endpoint returns
+# {ok, token: {...}} where "token" is the whole object, so "token" is tried
+# first and the nested search resolves both shapes.
+CA_KEYS = ("token", "address", "ca", "contract", "contract_address",
+           "contractAddress", "token_address", "tokenAddress", "id")
 NAME_KEYS = ("name", "token_name", "tokenName", "title")
 SYMBOL_KEYS = ("symbol", "ticker", "token_symbol", "tokenSymbol")
+# The launcher API exposes no supply field — supply lives on chain only
+# (factory.defaultTotalSupply()). These stay for other/future shapes.
 SUPPLY_KEYS = ("supply", "total_supply", "totalSupply", "max_supply", "maxSupply")
 
 

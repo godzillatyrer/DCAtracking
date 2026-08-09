@@ -50,6 +50,26 @@ A token deployed by an EOA rather than a contract arms nothing: that's a
 hand-deployment, not a launchpad, and watching the wallet would reintroduce
 exactly the noise this design exists to avoid.
 
+### Verified against the live site
+
+The launcher API entry shape is `response.tokens[i].token` — a **top-level
+`token` field holding the contract address**, not `address`/`ca`/
+`contractAddress`. It also carries `quote`, `pool` and `creator` addresses,
+so picking the wrong field would alert the wrong contract as the launch.
+There is no supply field; supply is on-chain only.
+
+The launcher factory is injected at build time from `NEXT_PUBLIC_*` and
+currently ships as `launcherFactory:""`. Next.js inlines these as string
+literals, so **the address appears in the JS bundle the moment the team sets
+it and redeploys** — usually before the launchpad opens. Track 3 watches for
+exactly that transition and arms the factory immediately, which is the
+earliest possible signal. Its poll rate tightens to 5 minutes inside 24h of
+T0 and 60 seconds in the war room so that window isn't missed.
+
+Known quote/pair assets (USDG, `$STONKBROKER`, WETH9) and the Clock In fee
+router are permanently ignored: the factory indexes them constantly and they
+are never launches.
+
 ### If you learn the factory address early
 
 Put it in `WATCH_CONTRACTS` (comma-separated) and the watcher scans all of

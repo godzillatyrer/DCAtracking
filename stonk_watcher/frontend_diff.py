@@ -7,6 +7,7 @@ new. This is how we'd learn the factory address hours before T0.
 """
 import logging
 import re
+from datetime import datetime, timezone
 from typing import List, Optional, Set
 
 import requests
@@ -21,6 +22,21 @@ log = logging.getLogger("frontend_diff")
 DEPLOYMENT_RE = re.compile(r"dpl_[A-Za-z0-9]+")
 ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 CHUNK_RE = re.compile(r"/_next/static/chunks/[^\"'\s\\]+?\.js")
+
+# The launcher factory address is injected at BUILD time from a
+# NEXT_PUBLIC_* env var, and is currently an empty string in the shipped
+# bundle (launcherFactory:""). Next.js inlines these as string literals, so
+# the address appears in the JS the moment the team sets it and redeploys —
+# typically before the launchpad opens. Catching that transition hands us
+# the factory ahead of any on-chain or API signal.
+FACTORY_PATTERNS = [
+    re.compile(r"launcherFactory[\"']?\s*:[^,}]{0,160}?(0x[a-fA-F0-9]{40})"),
+    re.compile(r"NEXT_PUBLIC_LAUNCHPAD_FACTORY[^,}]{0,160}?(0x[a-fA-F0-9]{40})"),
+    re.compile(r"NEXT_PUBLIC_STONK_LAUNCHER_FACTORY_ADDRESS"
+               r"[^,}]{0,160}?(0x[a-fA-F0-9]{40})"),
+]
+FACTORY_START_BLOCK_RE = re.compile(
+    r"launcherFactoryStartBlock[\"']?\s*:\s*(?:Number\()?[\"']?(\d{1,12})")
 
 MAX_CHUNKS = 50
 MAX_CHUNK_BYTES = 2_000_000
@@ -91,6 +107,11 @@ class FrontendDiffer:
                         f"site: {config.LAUNCHER_PAGE_URL}\n"
                         "Diffing bundles for new contract addresses...",
                         level="alert")
+
+        # Checked before the baseline gate: the factory going from "" to an
+        # address is the single highest-value signal on this site, and it
+        # must fire even on the very first cycle.
+        self._check_launcher_factory(blobs)
 
         found: Set[str] = set()
         for blob in blobs:
@@ -168,5 +189,54 @@ class FrontendDiffer:
                     category="launch" if token else "recon")
         self.state.save_if_dirty()
 
+    def _check_launcher_factory(self, blobs: List[str]) -> None:
+        """Detect the launcher factory address appearing in the site config.
+
+        The bundle currently ships `launcherFactory:""`. When the team sets
+        NEXT_PUBLIC_LAUNCHPAD_FACTORY and redeploys, the literal address is
+        baked into the JS. That is the launcher factory by the site's own
+        declaration — the strongest provenance available short of the API —
+        so it is armed immediately and every launch through it is caught
+        from its own logs.
+        """
+        for blob in blobs:
+            for pattern in FACTORY_PATTERNS:
+                match = pattern.search(blob)
+                if not match:
+                    continue
+                factory = match.group(1).lower()
+                if factory in config.BORING_ADDRESSES:
+                    continue
+                if self.state.is_known_launcher_factory(factory):
+                    return
+                start_block = 0
+                block_match = FACTORY_START_BLOCK_RE.search(blob)
+                if block_match:
+                    start_block = int(block_match.group(1))
+                self.state.add_candidate_factory(
+                    factory, start_block, source="frontend_config")
+                self.state.mark_dirty()
+                self.state.save_if_dirty()
+                log.warning("launcher factory published in bundle: %s", factory)
+                self.pipeline.send(
+                    f"LAUNCHER FACTORY PUBLISHED ON SITE\n{factory}\n"
+                    f"start block: {start_block or 'not stated'}\n"
+                    f"contract: "
+                    f"{config.BLOCKSCOUT_ADDRESS_URL.format(addr=factory)}\n"
+                    "The site now declares this as the Stonk Launcher "
+                    "factory. Now watching all of its logs — launches "
+                    "through it will alert from chain, ahead of the API.",
+                    level="loud", code_lines=[factory], category="launch")
+                return
+
     def interval(self, now=None) -> float:
+        """Hourly normally, but tightened near T0: the factory address can
+        be published any time in the run-up, and an hour of latency on that
+        would waste the whole advantage."""
+        now = now or datetime.now(timezone.utc)
+        dt = config.seconds_to_t0(now, config.get_t0())
+        if 3600 >= dt > -2 * 3600:
+            return 60.0
+        if 24 * 3600 >= dt > 3600:
+            return 300.0
         return config.FRONTEND_POLL_INTERVAL
