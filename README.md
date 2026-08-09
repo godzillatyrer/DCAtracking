@@ -13,29 +13,35 @@ blasts it to Telegram (and optionally Twilio SMS / macOS popups).
 |---|---|---|
 | 1. API sniper | `stonkbrokers.cash/api/launcher/tokens` + `/highlights`; new CAs get the detail endpoint called and are auto-tracked | 10s → 5s (last 24h) → **2s in the war room** (1h before → 2h after T0) → 10s |
 | 2. On-chain | Team wallets `0xb668…7CDa` and `0xBe49…8215`: outgoing txs alert, contract creations are auto-armed as **candidate factories** and scanned topic-agnostically with chunked `eth_getLogs`; token addresses are extracted from indexed topics and confirmed via Blockscout | 20s → **5s in the war room** |
-| 2d. Chain-wide mint watch | **Every ERC-20 mint on Robinhood Chain**, regardless of which factory produced it | same as track 2 |
+| 2d. Factory learning | Resolves the creator of every confirmed launchpad token and arms it, so later launches are caught from the factory's own logs | same as track 2 |
 | 3. Frontend diff | The launcher page + its `/_next/static/chunks/*.js` bundles, diffed for new contract addresses and Vercel redeploys | hourly |
 
-### Why the chain-wide mint watch exists
+### Only launchpad tokens alert — how that's enforced
 
-Tracks 1 and 2 both rest on an assumption. Track 1 assumes the token shows up
-in the launcher API. Track 2 assumes the launcher factory is deployed by one
-of the two known team wallets — if the team deploys it from a fresh wallet,
-or it already exists, nothing arms and that path stays silent.
+Robinhood Chain has constant unrelated token deployment. A watcher that
+alerts on *any* new token on the chain is useless: it fires every few seconds
+for memecoins that have nothing to do with the launchpad, and the launch
+alert drowns in them.
 
-A **mint is unavoidable**. A token cannot be distributed without a
-`Transfer` from the zero address, so Track 2d watches for exactly that across
-the entire chain and confirms each new contract via Blockscout. It doesn't
-need to know the factory, the deployer, or the API schema. That makes it the
-path that holds when the others' assumptions don't.
+There is no property of a token, viewed in isolation, that says "this came
+from the Stonk Launcher". So the watcher never guesses from the token —
+it alerts on **provenance** only. A token qualifies if either:
 
-The remaining edge: a token that assigns balances in its constructor without
-emitting `Transfer` would be missed. That violates the ERC-20 spec and
-OpenZeppelin's `_mint` always emits, so it's unlikely — and Tracks 1 and 2
-still cover it.
+1. **It appears in the launcher API** (`/api/launcher/tokens` or
+   `/highlights`). That is the launchpad's own backend, so this is
+   definitional, not a heuristic.
+2. **It came out of a confirmed launcher factory** — a contract a watched
+   team wallet was seen deploying, one listed in `WATCH_CONTRACTS`, or one
+   learned via Track 2d.
 
-NFT mints are filtered out (constant background noise on this chain) unless
-the name or symbol matches the target. Set `MINT_WATCH=0` to disable.
+Track 2d is what closes the loop. Whatever contract deployed an API-listed
+token *is* the launcher factory, so its address is resolved via Blockscout
+and armed automatically. From then on every launch is caught from the
+factory's logs — ahead of the API, with no chain-wide guessing.
+
+A token deployed by an EOA rather than a contract arms nothing: that's a
+hand-deployment, not a launchpad, and watching the wallet would reintroduce
+exactly the noise this design exists to avoid.
 
 ### If you learn the factory address early
 

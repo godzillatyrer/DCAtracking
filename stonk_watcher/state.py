@@ -25,9 +25,6 @@ def _default_state() -> Dict[str, Any]:
         "dev_wallets": {},                # wallet -> {baselined, seen_tx_hashes}
         "candidate_factories": {},        # addr -> {deploy_block, last_scanned, learned_topic0, confirmed_tokens, seen_log_keys}
         "amm_last_scanned": None,         # block cursor for optional AMM factory watch
-        # Chain-wide mint watch (catches tokens from unknown factories)
-        "mint_last_scanned": None,        # block cursor; None = start at head
-        "mint_seen_tokens": [],           # contracts already seen minting
         # Track 3
         "frontend": {
             "deployment_id": None,

@@ -42,6 +42,31 @@ class BlockscoutClient:
             return []
         return data.get("items", []) or []
 
+    def creation_info(self, address: str) -> Dict[str, Any]:
+        """Who deployed this contract, and in which block.
+
+        For a launchpad token the creator is the launcher factory itself,
+        which is how the factory address is learned without knowing it in
+        advance. Returns {creator, block} with None values when unavailable.
+        """
+        info = self.address_info(address)
+        if not info:
+            return {"creator": None, "block": None}
+        creator = info.get("creator_address_hash") or info.get("creator_address")
+        if isinstance(creator, dict):
+            creator = creator.get("hash")
+        block = None
+        tx_hash = info.get("creation_tx_hash") or info.get("creation_transaction_hash")
+        if tx_hash:
+            try:
+                tx = self._get(f"transactions/{tx_hash}")
+                if tx:
+                    block = tx_block_number(tx)
+            except requests.RequestException:
+                block = None
+        return {"creator": creator.lower() if isinstance(creator, str) else None,
+                "block": block}
+
     def classify_address(self, address: str) -> Dict[str, Any]:
         """Best-effort classification used by the address-extraction heuristic.
 
