@@ -42,6 +42,7 @@ def test_new_token_fires_clockin_alert_and_tracks(state, pipeline, errors):
     assert clockin, "CLOCKIN alert must fire"
     alert = clockin[0]
     assert alert["level"] == "loud"
+    assert alert["category"] == "launch", "must survive the ALERTS_MODE filter"
     # First line = bare CA for copy-paste speed.
     assert alert["text"].splitlines()[0] == CA
     assert CA in (alert["code_lines"] or [])
@@ -64,7 +65,12 @@ def test_non_clockin_token_gets_regular_alert(state, pipeline, errors):
 
     poller_orig_fetch = poller._fetch_json
     poller.run_once()
-    assert pipeline.find("NEW LAUNCHER TOKEN (API)")
+    launched = pipeline.find("NEW LAUNCHER TOKEN (API)")
+    assert launched
+    # Any launchpad token is the whole point, CLOCKIN or not — it must be
+    # delivered, not filtered as recon.
+    assert launched[0]["category"] == "launch"
+    assert launched[0]["level"] == "loud"
     assert not pipeline.find("*** CLOCKIN ***")
     assert state.is_tracked(BORING_ENTRY["address"])
 

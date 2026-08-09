@@ -163,7 +163,9 @@ class FrontendDiffer:
                     f"site: {config.LAUNCHER_PAGE_URL}\n"
                     "Possible factory / launch infra — appeared in the site "
                     "bundle before being announced.",
-                    level="loud", code_lines=[addr])
+                    level="loud", code_lines=[addr],
+                    # Only a CLOCKIN hit is a launch; a bare contract is recon.
+                    category="launch" if token else "recon")
         self.state.save_if_dirty()
 
     def interval(self, now=None) -> float:

@@ -84,6 +84,16 @@ def get_t0() -> datetime:
 
 TARGET_TOKEN_NAME = env("TARGET_TOKEN_NAME", "CLOCKIN")
 
+# What reaches your phone.
+#   "launches" (default) — only actual token launches, plus watcher-health
+#                          messages so a broken watcher is still visible.
+#   "all"                — every reconnaissance signal too: team wallet
+#                          activity, factory deploys, frontend diffs.
+# Recon alerts are still written to the log in "launches" mode; they are
+# simply not sent. Detection is unaffected either way — this filters
+# delivery only, so a suppressed factory deploy is still armed internally.
+ALERTS_MODE = env("ALERTS_MODE", "launches").lower()
+
 # --- Stonk Launcher backend -------------------------------------------------
 API_BASE = env("STONK_API_BASE", "https://www.stonkbrokers.cash")
 API_TOKENS_URL = API_BASE + "/api/launcher/tokens"

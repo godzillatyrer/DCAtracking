@@ -15,8 +15,9 @@ class FakePipeline:
     def __init__(self):
         self.sent = []
 
-    def send(self, text, level="alert", code_lines=None):
-        self.sent.append({"text": text, "level": level, "code_lines": code_lines})
+    def send(self, text, level="alert", code_lines=None, category="recon"):
+        self.sent.append({"text": text, "level": level,
+                          "code_lines": code_lines, "category": category})
 
     def texts(self):
         return [s["text"] for s in self.sent]

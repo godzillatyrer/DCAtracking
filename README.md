@@ -20,6 +20,26 @@ fires the loud `*** CLOCKIN ***` alert on every channel simultaneously —
 first line is the bare CA for copy-paste speed, and on Telegram the CA is a
 tap-to-copy code block.
 
+## What actually reaches your phone
+
+By default (`ALERTS_MODE=launches`) only two things are delivered:
+
+- **Token launches** — `NEW LAUNCHER TOKEN (API)`, `NEW TOKEN VIA NEW
+  FACTORY`, and `*** CLOCKIN ***`. This is the product.
+- **Watcher health** — errors, stalls, start/stop, heartbeat. Rare, and
+  they're what tells you the thing is broken rather than merely quiet.
+
+Everything else is *reconnaissance*: team-wallet transactions, contract
+deploys, candidate-factory log activity, frontend bundle diffs. All three
+tracks still run and still feed detection — a suppressed factory deploy is
+still armed internally, and any token it later emits alerts normally. The
+recon signals are just written to the log instead of your phone, because at
+T0 a busy team wallet can fire dozens of routine `deliverBatch`-style
+messages and bury the one alert that matters.
+
+Set `ALERTS_MODE=all` to see everything (useful while debugging, noisy
+during the launch window).
+
 ## You get an error message when it's NOT working
 
 Silence is a failure mode, so the watcher reports its own health to Telegram:
