@@ -26,6 +26,11 @@ from .state import State
 log = logging.getLogger("chain_watcher")
 
 MAX_ACTIVITY_ALERTS_PER_CYCLE = 5
+# Blockscout lookups for creator resolution, per cycle. Bounded so a burst
+# of API listings cannot delay the factory log scan that detects launches.
+MAX_CREATOR_LOOKUPS_PER_CYCLE = 8
+# Retries for a candidate whose creation Blockscout has not yet indexed.
+PENDING_MAX_ATTEMPTS = 20
 
 
 class ChainWatcher:
@@ -104,6 +109,7 @@ class ChainWatcher:
     # -- 2b: candidate factories ---------------------------------------------
     def scan_candidate_factories(self, head: int) -> None:
         for factory, fstate in list(self.state.candidate_factories().items()):
+            self._retry_pending(factory, fstate)
             from_block = fstate["last_scanned"] + 1
             if from_block > head:
                 continue
@@ -117,6 +123,19 @@ class ChainWatcher:
             self.state.mark_dirty()
             self._process_factory_logs(factory, fstate, logs)
         self.state.save_if_dirty()
+
+    def _retry_pending(self, factory: str, fstate: Dict[str, Any]) -> None:
+        """Re-check candidates whose creation Blockscout had not yet indexed."""
+        for candidate, info in list(fstate.get("pending", {}).items()):
+            self._check_candidate_token(factory, fstate, candidate,
+                                        info.get("topic0", "(no topic)"),
+                                        info.get("tx_link", "?"))
+            still = fstate.get("pending", {}).get(candidate)
+            if still and still.get("attempts", 0) >= PENDING_MAX_ATTEMPTS:
+                fstate["pending"].pop(candidate, None)
+                self.state.mark_dirty()
+                log.warning("giving up on %s after %d indexing retries",
+                            candidate, PENDING_MAX_ATTEMPTS)
 
     def _process_factory_logs(self, factory: str, fstate: Dict[str, Any],
                               logs: List[Dict[str, Any]]) -> None:
@@ -162,6 +181,36 @@ class ChainWatcher:
         token = info.get("token")
         if not (info.get("is_contract") and token):
             return
+
+        # A factory's logs REFERENCE many token addresses it did not create:
+        # the quote asset (USDG), LP pairs (themselves ERC-20s), fee or
+        # referral tokens. Alerting on every indexed address that resolves to
+        # a token is how unrelated tokens reach the phone. Require that this
+        # factory actually deployed it.
+        try:
+            creation = self.blockscout.creation_info(candidate)
+        except requests.RequestException as exc:
+            self._blockscout_failure(exc)
+            return
+        creator = (creation.get("creator") or "").lower()
+        if creator and creator != factory.lower():
+            log.info("skipping %s: referenced by %s but created by %s",
+                     candidate, factory, creator)
+            return
+        if not creator:
+            # Blockscout has not indexed the creation yet. The log itself is
+            # already marked seen, so queue an explicit retry — otherwise a
+            # real launch caught during indexing lag is lost forever.
+            pending = fstate.setdefault("pending", {})
+            attempts = pending.get(candidate, {}).get("attempts", 0)
+            if attempts < PENDING_MAX_ATTEMPTS:
+                pending[candidate] = {"topic0": topic0, "tx_link": tx_link,
+                                      "attempts": attempts + 1}
+                self.state.mark_dirty()
+                log.info("creation of %s not indexed yet; queued retry %d/%d",
+                         candidate, attempts + 1, PENDING_MAX_ATTEMPTS)
+            return
+        fstate.get("pending", {}).pop(candidate, None)
 
         name = str(token.get("name") or "?")
         symbol = str(token.get("symbol") or "?")
@@ -248,6 +297,7 @@ class ChainWatcher:
         deployed the factory, and once armed every later launch is caught
         from the factory's own logs, ahead of the API.
         """
+        resolved_this_cycle = 0
         for ca, info in list(self.state.data["tracked"].items()):
             # Provenance gate: ONLY a token the launcher API itself listed
             # proves its creator is the launcher factory. Tokens tracked from
@@ -258,26 +308,40 @@ class ChainWatcher:
                 continue
             if info.get("creator_resolved"):
                 continue
+            # Each token costs 2-4 sequential Blockscout calls. Unbounded,
+            # a burst of listings at T0 would delay scan_candidate_factories
+            # — the actual launch-detecting scan — by minutes.
+            if resolved_this_cycle >= MAX_CREATOR_LOOKUPS_PER_CYCLE:
+                log.info("creator-lookup cap reached; remaining tokens next cycle")
+                break
+            resolved_this_cycle += 1
             try:
                 creation = self.blockscout.creation_info(ca)
             except requests.RequestException as exc:
                 self._blockscout_failure(exc)
-                continue
-            self._blockscout_ok()
-            info["creator_resolved"] = True
-            self.state.mark_dirty()
+                continue  # transient: retry next cycle, stay unresolved
 
             creator = creation.get("creator")
-            if not creator or creator in config.BORING_ADDRESSES:
+            if not creator:
+                # Indexing lag right after launch. Do NOT mark resolved, or
+                # the flagship token would never teach us the factory.
+                log.info("creator of %s not indexed yet; retrying next cycle", ca)
+                continue
+
+            self._blockscout_ok()
+            if creator in config.BORING_ADDRESSES:
+                self.state.set_tracked_field(ca, "creator_resolved", True)
                 continue
             if creator.lower() in self.state.candidate_factories():
+                self.state.set_tracked_field(ca, "creator_resolved", True)
                 continue
             # An EOA-deployed token was launched by hand, not by a factory.
             try:
                 creator_info = self.blockscout.classify_address(creator)
             except requests.RequestException as exc:
                 self._blockscout_failure(exc)
-                continue
+                continue  # transient: leave unresolved so it retries
+            self.state.set_tracked_field(ca, "creator_resolved", True)
             if not creator_info.get("is_contract"):
                 log.info("token %s was deployed by an EOA, not a factory", ca)
                 continue

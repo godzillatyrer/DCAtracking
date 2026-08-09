@@ -130,6 +130,21 @@ class Supervisor:
             + "\n".join(as_checklist(self.state)),
             level="info", category="health")
 
+        report = self.state.take_migration_report()
+        if report and (report.get("purged_factories") or report.get("purged_tokens")):
+            factories = report.get("purged_factories") or []
+            self.pipeline.send(
+                "STATE CLEANED ON UPGRADE\n"
+                f"removed {len(factories)} factory watch(es) and "
+                f"{len(report.get('purged_tokens') or [])} tracked token(s) "
+                "that had no launchpad provenance.\n"
+                + ("".join(f"\n  {a}" for a in factories[:10])
+                   + "\nIf one of these was the real launcher factory, set "
+                     "WATCH_CONTRACTS to re-arm it."
+                   if factories else ""),
+                level="info", category="health")
+            self.state.save_if_dirty()
+
         for comp in self.components:
             thread = threading.Thread(target=self._worker, args=(comp,),
                                       name=comp.name, daemon=True)

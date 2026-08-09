@@ -35,13 +35,34 @@ def _first_key(obj: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[Any]:
     return None
 
 
-def extract_ca(obj: Dict[str, Any]) -> Optional[str]:
+def _search_keys(obj: Any, depth: int = 0) -> Optional[str]:
+    """Find a CA under a known key, at any nesting depth."""
+    if depth > 4 or not isinstance(obj, dict):
+        return None
     value = _first_key(obj, CA_KEYS)
     if isinstance(value, str) and ADDRESS_RE.fullmatch(value.strip()):
         return value.strip().lower()
-    # Schema is unconfirmed — fall back to any address-shaped string anywhere.
-    match = ADDRESS_RE.search(json.dumps(obj))
-    return match.group(0).lower() if match else None
+    for nested in obj.values():
+        if isinstance(nested, dict):
+            found = _search_keys(nested, depth + 1)
+            if found:
+                return found
+    return None
+
+
+def extract_ca(obj: Dict[str, Any]) -> Optional[str]:
+    """Extract the token address from a launcher API entry.
+
+    Only named keys are trusted, at any depth. A blind regex over the whole
+    JSON was previously used as a fallback and is NOT safe: it has no word
+    boundary, so the first 40 hex characters of a 64-char tx hash match, and
+    it happily returns a pool address, a creator wallet, or any other
+    address that happens to appear first. Whatever it returned was stamped
+    source="api" — the trust anchor that gates factory learning and launch
+    alerts — so a wrong guess both alerts the wrong CA and teaches a bogus
+    factory. Returning None instead surfaces the entry for inspection.
+    """
+    return _search_keys(obj)
 
 
 class ApiPoller:
@@ -133,8 +154,6 @@ class ApiPoller:
 
         # Arm LP detection instantly.
         self.state.add_tracked(ca, source="api", name=name, symbol=symbol)
-        self.state.mark_api_token_seen(ca)
-        self.state.save_if_dirty()
 
         raw = {"entry": entry, "detail": detail}
         if clockin:
@@ -149,6 +168,13 @@ class ApiPoller:
                     f"raw:   {json.dumps(raw, separators=(',', ':'))[:1500]}")
             self.pipeline.send(text, level="loud", code_lines=[ca],
                                category="launch")
+
+        # Mark seen only AFTER the alert is out. Doing it first means a
+        # failed state save (disk error, concurrent-write crash) aborts the
+        # cycle with the token already deduped — the one CLOCKIN alert this
+        # exists to deliver would be silently swallowed and never retried.
+        self.state.mark_api_token_seen(ca)
+        self.state.save_if_dirty()
 
     def _handle_ca_less_entry(self, entry: Dict[str, Any]) -> None:
         digest = str(hash(json.dumps(entry, sort_keys=True)))

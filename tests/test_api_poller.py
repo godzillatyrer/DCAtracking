@@ -134,6 +134,22 @@ def test_throttle_backoff_alerts_once(state, pipeline, errors):
 
 def test_extract_ca_from_unknown_schema():
     assert extract_ca({"contractAddress": CA}) == CA
-    assert extract_ca({"nested": {"whatever": f"token at {CA} yes"}}) == CA
+    assert extract_ca({"token": {"address": CA}}) == CA, "nested known keys work"
     assert extract_ca({"name": "no address here"}) is None
     assert json.dumps(TOKEN_ENTRY)  # sanity: entries stay JSON-serializable
+
+
+def test_extract_ca_rejects_addresses_that_are_not_the_token():
+    """Whatever this returns is stamped source="api" — the trust anchor for
+    launch alerts and factory learning — so a confident wrong answer is far
+    worse than None. A blind regex over the payload produced all of these."""
+    tx_hash = "0x" + "ab" * 32
+    # No word boundary: the first 40 hex chars of a tx hash look like an
+    # address, and a regex fallback returned that nonexistent contract.
+    assert extract_ca({"txHash": tx_hash}) is None
+    # A pool/pair address is a real contract, and a real wrong answer.
+    assert extract_ca({"pool": "0x" + "cd" * 20}) is None
+    # The creator's wallet is not the token.
+    assert extract_ca({"creatorWallet": "0x" + "ef" * 20}) is None
+    # Named keys still win when present alongside decoys.
+    assert extract_ca({"txHash": tx_hash, "token": {"address": CA}}) == CA

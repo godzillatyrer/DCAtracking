@@ -96,13 +96,14 @@ def test_contract_creation_enters_candidate_factories(state, pipeline, errors):
 def test_token_discovery_from_raw_logs(state, pipeline, errors):
     """Address-extraction heuristic end to end: raw factory logs -> token
     confirmed via Blockscout -> NEW TOKEN VIA NEW FACTORY -> tracked."""
-    state.add_candidate_factory(FACTORY, 900)
+    state.add_candidate_factory(FACTORY, 900, source="team_wallet")
     rpc = FakeRpc(logs_by_address={FACTORY.lower(): [
         factory_log("0xaaa1", [TOPIC_MARKET_CREATED, pad_address(TOKEN),
                                "0x" + "11" * 32]),  # second topic is not an address
     ]})
     bs = FakeBlockscout(tokens={TOKEN: {"name": "MANCER", "symbol": "MANCER",
-                                        "total_supply": "42"}})
+                                        "total_supply": "42"}},
+                        creators={TOKEN: {"creator": FACTORY, "block": 900}})
     watcher = make_watcher(state, pipeline, errors, rpc=rpc, blockscout=bs)
     watcher.run_once()
 
@@ -123,7 +124,7 @@ def test_token_discovery_from_raw_logs(state, pipeline, errors):
 
 
 def test_learned_topic0_used_after_first_token(state, pipeline, errors):
-    state.add_candidate_factory(FACTORY, 900)
+    state.add_candidate_factory(FACTORY, 900, source="team_wallet")
     state.candidate_factories()[FACTORY.lower()]["learned_topic0"] = TOPIC_MARKET_CREATED
     rpc = FakeRpc()
     watcher = make_watcher(state, pipeline, errors, rpc=rpc)
@@ -134,12 +135,13 @@ def test_learned_topic0_used_after_first_token(state, pipeline, errors):
 
 
 def test_clockin_via_chain_path(state, pipeline, errors):
-    state.add_candidate_factory(FACTORY, 900)
+    state.add_candidate_factory(FACTORY, 900, source="team_wallet")
     rpc = FakeRpc(logs_by_address={FACTORY.lower(): [
         factory_log("0xaaa2", [TOPIC_MARKET_CREATED, pad_address(TOKEN)]),
     ]})
     bs = FakeBlockscout(tokens={TOKEN: {"name": "ClockIn", "symbol": "CLOCKIN",
-                                        "total_supply": "1000000000"}})
+                                        "total_supply": "1000000000"}},
+                        creators={TOKEN: {"creator": FACTORY, "block": 900}})
     watcher = make_watcher(state, pipeline, errors, rpc=rpc, blockscout=bs)
     watcher.run_once()
     clockin = pipeline.find("*** CLOCKIN ***")
@@ -151,11 +153,12 @@ def test_clockin_via_chain_path(state, pipeline, errors):
 def test_factory_logs_dedupe_survive_restart(tmp_path, pipeline, errors):
     path = str(tmp_path / "state.json")
     state1 = State(path=path)
-    state1.add_candidate_factory(FACTORY, 900)
+    state1.add_candidate_factory(FACTORY, 900, source="team_wallet")
     logs = {FACTORY.lower(): [
         factory_log("0xaaa3", [TOPIC_MARKET_CREATED, pad_address(TOKEN)]),
     ]}
-    bs = FakeBlockscout(tokens={TOKEN: {"name": "KIDDIES", "symbol": "KIDDIES"}})
+    bs = FakeBlockscout(tokens={TOKEN: {"name": "KIDDIES", "symbol": "KIDDIES"}},
+                        creators={TOKEN: {"creator": FACTORY, "block": 900}})
     watcher1 = make_watcher(state1, pipeline, errors,
                             rpc=FakeRpc(logs_by_address=logs), blockscout=bs)
     watcher1.run_once()
@@ -177,3 +180,45 @@ def test_topic_to_address():
     assert topic_to_address("0x" + "0" * 64) is None       # zero address
     assert topic_to_address("0xdeadbeef") is None          # wrong length
     assert topic_to_address(None) is None
+
+
+def test_token_merely_referenced_by_factory_does_not_alert(state, pipeline, errors):
+    """A factory's logs index the quote asset, LP pairs and fee tokens — all
+    real ERC-20s it did not create. Alerting on those is how unrelated tokens
+    reached the phone."""
+    quote_asset = "0x9999999999999999999999999999999999999999"
+    state.add_candidate_factory(FACTORY, 900, source="team_wallet")
+    rpc = FakeRpc(logs_by_address={FACTORY.lower(): [
+        factory_log("0xaaa9", [TOPIC_MARKET_CREATED, pad_address(quote_asset)]),
+    ]})
+    bs = FakeBlockscout(
+        tokens={quote_asset: {"name": "USD Gold", "symbol": "USDG"}},
+        creators={quote_asset: {"creator": "0xdeadbeef00000000000000000000000000000001",
+                                "block": 10}})
+    make_watcher(state, pipeline, errors, rpc=rpc, blockscout=bs).run_once()
+
+    assert not pipeline.find("NEW TOKEN VIA NEW FACTORY"), (
+        "a token the factory did not create is not a launch")
+    assert not state.is_tracked(quote_asset)
+
+
+def test_unindexed_creation_is_retried_not_lost(state, pipeline, errors):
+    """Blockscout indexing lag at T0 must not silently drop a real launch."""
+    state.add_candidate_factory(FACTORY, 900, source="team_wallet")
+    logs = {FACTORY.lower(): [
+        factory_log("0xaaab", [TOPIC_MARKET_CREATED, pad_address(TOKEN)])]}
+    tokens = {TOKEN: {"name": "CLOCKIN", "symbol": "CLOCKIN"}}
+    # Cycle 1: creation not indexed yet -> queued, no alert, no false negative.
+    bs = FakeBlockscout(tokens=tokens, creators={})
+    watcher = make_watcher(state, pipeline, errors,
+                           rpc=FakeRpc(logs_by_address=logs), blockscout=bs)
+    watcher.run_once()
+    assert not pipeline.find("*** CLOCKIN ***")
+    assert TOKEN in state.candidate_factories()[FACTORY.lower()]["pending"]
+
+    # Cycle 2: Blockscout has caught up -> the launch alert fires.
+    bs.creators[TOKEN] = {"creator": FACTORY, "block": 900}
+    watcher.run_once()
+    clockin = pipeline.find("*** CLOCKIN ***")
+    assert clockin and clockin[0]["category"] == "launch"
+    assert TOKEN not in state.candidate_factories()[FACTORY.lower()].get("pending", {})

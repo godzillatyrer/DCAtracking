@@ -72,27 +72,68 @@ class State:
     SCHEMA_VERSION = SCHEMA_VERSION  # class alias for callers/tests
 
     def _migrate(self) -> None:
-        """One-time cleanups for state written by earlier versions."""
+        """One-time cleanups for state written by earlier versions.
+
+        Records what it removed in meta["migration_v2"] so the watcher can
+        report it — a silent purge could otherwise disarm the real launcher
+        factory with nobody the wiser.
+        """
         meta = self.data.setdefault("meta", {})
         if meta.get("schema", 1) >= self.SCHEMA_VERSION:
             return
         # v2: the chain-wide mint watch was removed. Tokens it tracked
-        # (source "mint") are NOT launchpad tokens, and any factory armed
-        # before per-entry provenance existed can only have been learned
-        # from them — generic memecoin factories, not the Stonk Launcher.
-        # Purge both so only launchpad provenance remains. Legitimate
-        # factories re-arm on their own: WATCH_CONTRACTS entries every
-        # cycle, API-derived ones as soon as the launcher API lists tokens.
+        # (source "mint") are NOT launchpad tokens, and factories armed
+        # before per-entry provenance existed cannot be told apart from the
+        # generic memecoin factories that incident learned — so they go too.
         tracked = self.data.get("tracked", {})
-        for ca in [c for c, i in tracked.items() if i.get("source") == "mint"]:
-            del tracked[ca]
         factories = self.data.get("candidate_factories", {})
-        for addr in [a for a, f in factories.items() if "source" not in f]:
+
+        purged_factories = [a for a, f in factories.items() if "source" not in f]
+        for addr in purged_factories:
             del factories[addr]
+
+        # Mint leftovers, plus tokens confirmed *by* a factory we just
+        # purged — those were the incident's false positives and would keep
+        # firing LP/market alerts from the AMM scan.
+        doomed = {c for c, i in tracked.items() if i.get("source") == "mint"}
+        doomed |= {c for c, i in tracked.items()
+                   if i.get("source") == "chain"
+                   and str(i.get("factory", "")).lower() in purged_factories}
+        for ca in doomed:
+            del tracked[ca]
+
+        # Critical: pre-v2 code stamped creator_resolved on every tracked
+        # token, including API-listed ones, while arming factories without
+        # provenance. Purging those factories above would otherwise leave
+        # the real launcher factory unarmed AND unlearnable, because the
+        # token that could re-teach it is marked already-resolved. Clearing
+        # the flag makes the next cycle re-learn it.
+        for info in tracked.values():
+            if info.get("source") == "api":
+                info.pop("creator_resolved", None)
+
         for stale_key in ("mint_last_scanned", "mint_seen_tokens"):
             self.data.pop(stale_key, None)
         meta["schema"] = self.SCHEMA_VERSION
+        meta["migration_v2"] = {
+            "purged_factories": purged_factories,
+            "purged_tokens": sorted(doomed),
+            "reported": False,
+        }
         self.mark_dirty()
+
+    def set_tracked_field(self, ca: str, key: str, value: Any) -> None:
+        """Mutate a tracked entry under the lock.
+
+        Inserting a NEW key into a nested dict without the lock can crash a
+        concurrent save() with "dictionary changed size during iteration",
+        because json.dump walks these dicts incrementally.
+        """
+        with _LOCK:
+            entry = self.data["tracked"].get(ca.lower())
+            if entry is not None:
+                entry[key] = value
+                self.mark_dirty()
 
     def save(self) -> None:
         with _LOCK:
@@ -149,7 +190,7 @@ class State:
 
     # -- candidate factories -------------------------------------------------
     def add_candidate_factory(self, addr: str, deploy_block: int,
-                              source: str = "unknown") -> bool:
+                              source: str) -> bool:
         """source records the provenance that justified arming this factory:
         "team_wallet" (watched wallet deployed it), "config"
         (WATCH_CONTRACTS), or "learned_from_api" (creator of an API-listed
@@ -191,9 +232,30 @@ class State:
     def frontend(self) -> Dict[str, Any]:
         return self.data["frontend"]
 
+    def take_migration_report(self) -> Optional[Dict[str, Any]]:
+        """Return the v2 migration summary once, then mark it reported."""
+        with _LOCK:
+            report = self.data.get("meta", {}).get("migration_v2")
+            if not report or report.get("reported"):
+                return None
+            report["reported"] = True
+            self.mark_dirty()
+            return report
+
 
 def as_checklist(state: "State") -> List[str]:
-    """One-glance status summary used by --status and the heartbeat."""
+    """One-glance status summary used by --status and the heartbeat.
+
+    Runs on the watchdog/heartbeat threads while workers mutate state, so it
+    takes the lock: a first-sight wallet inserting into dev_wallets mid-scan
+    would otherwise raise "dictionary changed size during iteration" and
+    kill the heartbeat — the very signal that proves the watcher is alive.
+    """
+    with _LOCK:
+        return _checklist_locked(state)
+
+
+def _checklist_locked(state: "State") -> List[str]:
     data = state.data
     return [
         f"tracked CAs: {len(data['tracked'])}",
