@@ -102,6 +102,77 @@ State lives in `data/state.json` — restarts never duplicate alerts, and
 candidate factories / API dedupe survive. Delete the file only if you want a
 full re-baseline.
 
+## Deploying on Render
+
+A `render.yaml` blueprint is included. **Render Dashboard → New → Blueprint →
+pick this repo →** you'll be prompted for `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID`. That's the whole deploy.
+
+It provisions a **Background Worker** (`$7/mo` starter) plus a **1 GB
+persistent disk** (`$0.25/mo`) mounted at `/var/data`, with
+`STATE_FILE=/var/data/state.json`. Per-service compute is billed on top of
+your workspace plan rather than included in it, so expect ~$7.25/mo for this
+service regardless of which workspace tier you're on.
+
+Two Render facts drive that shape, and both matter here:
+
+- **Background workers have no free instance type** — a long-running process
+  with no HTTP endpoint is a paid service, minimum $7/mo.
+- **Render's filesystem is ephemeral without a disk.** Every deploy and every
+  restart would reset `state.json`, losing alert dedupe, wallet baselines and
+  candidate factories. The watcher would re-alert on everything it already
+  saw. The $0.25 disk is what makes restart survival real.
+
+### The free alternative, and why it's risky for this job
+
+Free instances only exist for *web services*, so the free path is: change
+`type: worker` to `type: web` in `render.yaml`, drop the `disk:` block, and
+set `plan: free`. The watcher already serves a JSON health endpoint on
+`$PORT` when Render sets it (Render fails a web-service deploy if nothing
+binds a port). Then:
+
+- **Free web services spin down after 15 minutes with no inbound traffic**,
+  and cold start takes ~1 minute. Outbound polling does *not* keep them
+  awake. A sleeping sniper misses the launch entirely. You'd need an external
+  uptime monitor (UptimeRobot etc.) hitting the health URL every 5 minutes to
+  hold it open — workable, but one more thing to fail on launch night.
+- **No disk on free**, so state resets on every restart.
+- Free instances share 750 hours/month per workspace.
+
+For a one-shot event two days out, $7.25 buys away both failure modes. My
+actual recommendation: **run it on Render *and* on your Mac.** They keep
+independent state, so you'd get each alert twice — mildly annoying, and far
+better than one host dying at 7:58 PM.
+
+### The health endpoint
+
+Any deployment can expose it: `python3 watcher.py --port 10000`, or just set
+`PORT`. `GET /` returns **200** while every component is cycling on schedule
+and **503** once the watchdog considers one stalled — so pointing UptimeRobot
+at it gives you a second, fully independent "it stopped working" alarm that
+doesn't depend on the watcher's own Telegram path being healthy.
+
+```json
+{ "healthy": true, "hours_to_t0": 53.3, "war_room": false,
+  "components": { "api_poller": { "last_cycle_seconds_ago": 6.0, "ok": true } },
+  "telegram_configured": true, "tracked_count": 0 }
+```
+
+It deliberately reports **counts only, never contract addresses** — a Render
+web service URL is public, and the CA is the entire edge.
+
+### Render caveats worth knowing before launch night
+
+- **Auto-deploy is on** (`autoDeployTrigger: commit`). A push to the deployed
+  branch restarts the worker mid-window. Turn it off in the dashboard on
+  Tuesday.
+- macOS alerts obviously don't work there; Telegram is the channel.
+- `python3 watcher.py --test-alert` runs from the Render **Shell** tab (paid
+  instances), or just test locally — it's the same bot token either way.
+- The blueprint sets no `branch:`, so Render follows the repo's default
+  branch. Confirm the branch shown in the Render dashboard is the one your
+  merged code is actually on before launch night.
+
 ## Tuesday evening checklist (one glance)
 
 1. **Is the heartbeat printing?** The console logs a `HEARTBEAT` line every
@@ -124,6 +195,7 @@ full re-baseline.
 | `python3 watcher.py --test-alert` | test every alert channel end to end |
 | `python3 watcher.py --status` | state summary + current poll cadence |
 | `python3 watcher.py --once` | single cycle of each component (debugging) |
+| `python3 watcher.py --port 10000` | also serve the JSON health endpoint |
 | `python3 -m pytest tests/ -v` | offline acceptance tests |
 
 ### Live integration test (acceptance test 3)
