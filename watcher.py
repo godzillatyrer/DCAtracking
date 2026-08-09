@@ -6,6 +6,10 @@ Usage:
   python3 watcher.py --test-alert  send a test alert on every channel
   python3 watcher.py --status      print state summary and poll cadence
   python3 watcher.py --once        run one cycle of each component and exit
+  python3 watcher.py --port 10000  also serve a JSON health endpoint
+
+The health endpoint is only needed on hosts that require an open port
+(e.g. a Render web service). $PORT is honored automatically.
 """
 import argparse
 import logging
@@ -17,6 +21,7 @@ from stonk_watcher.alerts import AlertPipeline, ErrorReporter
 from stonk_watcher.api_poller import ApiPoller
 from stonk_watcher.chain_watcher import ChainWatcher
 from stonk_watcher.frontend_diff import FrontendDiffer
+from stonk_watcher.health import start_health_server
 from stonk_watcher.state import State, as_checklist
 from stonk_watcher.supervisor import Supervisor
 
@@ -72,6 +77,9 @@ def main() -> int:
                         help="print state summary and exit")
     parser.add_argument("--once", action="store_true",
                         help="run one cycle of each component and exit")
+    parser.add_argument("--port", type=int, default=None,
+                        help="serve a JSON health endpoint on this port "
+                             "(defaults to $PORT when set)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -104,6 +112,11 @@ def main() -> int:
     supervisor = Supervisor(state, pipeline, errors)
     for component in components:
         supervisor.add(component)
+
+    port = args.port if args.port is not None else config.env_int("PORT", 0)
+    if port:
+        start_health_server(supervisor, port)
+
     supervisor.run()
     return 0
 
