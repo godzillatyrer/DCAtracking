@@ -138,17 +138,6 @@ WATCH_CONTRACTS = [a.strip() for a in env("WATCH_CONTRACTS").split(",") if a.str
 # How far back to scan when a contract is added to WATCH_CONTRACTS.
 WATCH_CONTRACTS_LOOKBACK = env_int("WATCH_CONTRACTS_LOOKBACK", 5000)
 
-# Chain-wide safety net: watch every ERC-20 mint on Robinhood Chain, not
-# just tokens from known factories. This is what catches CLOCKIN if the
-# launcher factory is deployed by a wallet we never see, or already exists.
-# Costs one extra topic-filtered eth_getLogs per cycle.
-MINT_WATCH = env_bool("MINT_WATCH", True)
-# ERC-20/721 Transfer(address indexed from, address indexed to, ...)
-TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-ZERO_TOPIC = "0x" + "0" * 64
-# Cap Blockscout lookups per cycle so a burst can't stall the loop.
-MAX_MINT_CHECKS_PER_CYCLE = env_int("MAX_MINT_CHECKS_PER_CYCLE", 40)
-
 # Known-boring addresses ignored by the frontend differ. These are universal
 # infrastructure deployed at the same address on every chain — their presence
 # in a site bundle says nothing about a launch.

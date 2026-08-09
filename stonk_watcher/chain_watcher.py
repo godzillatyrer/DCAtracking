@@ -237,98 +237,56 @@ class ChainWatcher:
                 level="info", category="health")
         self.state.save_if_dirty()
 
-    # -- chain-wide mint watch -----------------------------------------------
-    def scan_new_mints(self, head: int) -> None:
-        """Catch any contract minting a token for the first time, anywhere on
-        the chain.
+    # -- learn the real factory from a confirmed launchpad token -------------
+    def learn_factories_from_tracked(self, head: int) -> None:
+        """Resolve the creator of every confirmed launchpad token and arm it.
 
-        Everything else on-chain here is conditional: it only sees a token if
-        that token came out of a factory we already knew to watch. If the
-        launcher factory is deployed by a wallet we never see, or already
-        exists, those paths are blind. A mint (Transfer from the zero
-        address) is unavoidable — a token cannot be distributed without one —
-        so this is the net that does not depend on knowing the factory.
+        A token that appeared in the launcher API is, by definition, from the
+        launchpad — so whatever contract deployed it *is* the Stonk Launcher
+        factory. Learning it this way needs no guesswork about which wallet
+        deployed the factory, and once armed every later launch is caught
+        from the factory's own logs, ahead of the API.
         """
-        if not config.MINT_WATCH:
-            return
-        last = self.state.data.get("mint_last_scanned")
-        if not isinstance(last, int):
-            # First run: start at the current head. Scanning history would
-            # alert on every token that ever launched on this chain.
-            self.state.data["mint_last_scanned"] = head
-            self.state.mark_dirty()
-            self.state.save_if_dirty()
-            log.info("mint watch armed at block %d", head)
-            return
-        if last >= head:
-            return
-
-        try:
-            logs = self.rpc.get_logs_chunked(
-                None, last + 1, head,
-                topics=[config.TRANSFER_TOPIC0, config.ZERO_TOPIC])
-        except RpcError as exc:
-            log.warning("mint scan failed: %s", exc)
-            return  # leave the cursor put so the range is retried
-        self.state.data["mint_last_scanned"] = head
-        self.state.mark_dirty()
-
-        seen = self.state.data["mint_seen_tokens"]
-        checked = 0
-        for entry in logs:
-            addr = (entry.get("address") or "").lower()
-            if not addr or addr in seen or addr in config.BORING_ADDRESSES:
+        for ca, info in list(self.state.data["tracked"].items()):
+            if info.get("creator_resolved"):
                 continue
-            seen.append(addr)
-            self.state.mark_dirty()
-            if checked >= config.MAX_MINT_CHECKS_PER_CYCLE:
-                log.warning("mint check cap hit; %s deferred", addr)
+            try:
+                creation = self.blockscout.creation_info(ca)
+            except requests.RequestException as exc:
+                self._blockscout_failure(exc)
                 continue
-            checked += 1
-            self._check_minted_token(addr, entry)
-        self.state.save_if_dirty()
+            self._blockscout_ok()
+            info["creator_resolved"] = True
+            self.state.mark_dirty()
 
-    def _check_minted_token(self, addr: str, entry: Dict[str, Any]) -> None:
-        if self.state.is_tracked(addr):
-            return  # another track already alerted on this one
-        try:
-            info = self.blockscout.classify_address(addr)
-        except requests.RequestException as exc:
-            self._blockscout_failure(exc)
-            return
-        self._blockscout_ok()
-        token = info.get("token")
-        if not token:
-            return
-        name = str(token.get("name") or "?")
-        symbol = str(token.get("symbol") or "?")
-        supply = str(token.get("total_supply") or token.get("totalSupply") or "?")
-        token_type = str(token.get("type") or "").upper()
-        clockin = is_target_token(name, symbol)
-        # NFT mints are constant background noise on this chain; only a name
-        # match earns an alert from them.
-        if "721" in token_type or "1155" in token_type:
-            if not clockin:
-                return
-        tx_link = config.BLOCKSCOUT_TX_URL.format(
-            tx=entry.get("transactionHash", "?"))
-        self.state.add_tracked(addr, source="mint", name=name, symbol=symbol)
-        self.state.mark_dirty()
+            creator = creation.get("creator")
+            if not creator or creator in config.BORING_ADDRESSES:
+                continue
+            if creator.lower() in self.state.candidate_factories():
+                continue
+            # An EOA-deployed token was launched by hand, not by a factory.
+            try:
+                creator_info = self.blockscout.classify_address(creator)
+            except requests.RequestException as exc:
+                self._blockscout_failure(exc)
+                continue
+            if not creator_info.get("is_contract"):
+                log.info("token %s was deployed by an EOA, not a factory", ca)
+                continue
 
-        if clockin:
-            text = format_clockin_alert(addr, "chain (first mint)", name, symbol,
-                                        supply, tx_link=tx_link)
-            self.pipeline.send(text, level="loud", code_lines=[addr],
-                               category="launch")
-        else:
+            block = creation.get("block")
+            if not isinstance(block, int):
+                block = max(0, head - config.WATCH_CONTRACTS_LOOKBACK)
+            self.state.add_candidate_factory(creator, block)
+            log.info("learned launcher factory %s from token %s", creator, ca)
             self.pipeline.send(
-                f"NEW TOKEN MINTED ON CHAIN\n{addr}\n"
-                f"{name} ({symbol}) | supply: {supply}\n"
-                f"token: {config.BLOCKSCOUT_TOKEN_URL.format(ca=addr)}\n"
-                f"tx: {tx_link}\n"
-                "First mint seen on Robinhood Chain — may or may not be from "
-                "the launchpad.",
-                level="loud", code_lines=[addr], category="launch")
+                f"LEARNED LAUNCHER FACTORY\n{creator}\n"
+                f"deduced from launchpad token {info.get('symbol', ca)}.\n"
+                f"contract: {config.BLOCKSCOUT_ADDRESS_URL.format(addr=creator)}\n"
+                "Every further launch from this factory is now caught on "
+                "chain, ahead of the site.",
+                level="info", category="health", code_lines=[creator])
+        self.state.save_if_dirty()
 
     # -- plumbing ------------------------------------------------------------
     def _safe_head(self) -> int:
@@ -377,9 +335,7 @@ class ChainWatcher:
         self.check_dev_wallets()
         if head is not None:
             self.seed_watched_contracts(head)
-            # Chain-wide net first: it is the path that does not depend on
-            # having guessed the factory correctly.
-            self.scan_new_mints(head)
+            self.learn_factories_from_tracked(head)
             self.scan_candidate_factories(head)
             self.scan_amm_factory(head)
 

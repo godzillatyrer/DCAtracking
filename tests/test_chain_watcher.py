@@ -36,12 +36,16 @@ class FakeRpc:
 
 
 class FakeBlockscout:
-    def __init__(self, txs_by_wallet=None, tokens=None):
+    def __init__(self, txs_by_wallet=None, tokens=None, creators=None):
         self.txs_by_wallet = txs_by_wallet or {}
         self.tokens = tokens or {}
+        self.creators = creators or {}
 
     def address_transactions(self, address, direction="from"):
         return self.txs_by_wallet.get(address.lower(), [])
+
+    def creation_info(self, address):
+        return self.creators.get(address.lower(), {"creator": None, "block": None})
 
     def classify_address(self, address):
         token = self.tokens.get(address.lower())
