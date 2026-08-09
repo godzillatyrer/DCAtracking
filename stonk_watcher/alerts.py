@@ -33,13 +33,24 @@ class AlertPipeline:
         self._telegram_down_alerted = False
 
     # -- public API ----------------------------------------------------------
-    def send(self, text: str, level: str = "alert", code_lines: Optional[List[str]] = None) -> None:
+    def send(self, text: str, level: str = "alert",
+             code_lines: Optional[List[str]] = None,
+             category: str = "recon") -> None:
         """Fan out to every configured channel on parallel threads.
 
         code_lines: lines to render as tap-to-copy <code> blocks on Telegram
         (used for the bare CA line of the CLOCKIN alert).
+
+        category: "launch" for an actual token launch, "health" for watcher
+        status, "recon" for supporting on-chain/frontend signals. In the
+        default ALERTS_MODE="launches" only launch and health messages are
+        delivered; recon is logged and dropped. Defaults to "recon" so a
+        newly added alert stays quiet unless deliberately promoted.
         """
-        log.info("ALERT [%s]\n%s", level, text)
+        if config.ALERTS_MODE != "all" and category == "recon":
+            log.info("SUPPRESSED [recon] %s", text.splitlines()[0])
+            return
+        log.info("ALERT [%s/%s]\n%s", level, category, text)
         threads = []
         if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
             threads.append(threading.Thread(
@@ -214,11 +225,13 @@ class ErrorReporter:
                 log.warning("suppressed repeat error [%s]: %s", component, message)
                 return
             self._last_sent[key] = now
-        self.pipeline.send(f"WATCHER ERROR [{component}]\n{message}", level=level)
+        self.pipeline.send(f"WATCHER ERROR [{component}]\n{message}", level=level,
+                           category="health")
 
     def report_exception(self, component: str, exc: BaseException) -> None:
         self.report(component, f"{type(exc).__name__}: {exc}",
                     key=f"{component}:{type(exc).__name__}")
 
     def recovered(self, component: str, message: str) -> None:
-        self.pipeline.send(f"WATCHER RECOVERED [{component}]\n{message}", level="info")
+        self.pipeline.send(f"WATCHER RECOVERED [{component}]\n{message}",
+                           level="info", category="health")

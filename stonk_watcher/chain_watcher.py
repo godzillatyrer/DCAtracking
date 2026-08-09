@@ -179,13 +179,15 @@ class ChainWatcher:
         if is_target_token(name, symbol):
             text = format_clockin_alert(candidate, "chain", name, symbol, supply,
                                         tx_link=tx_link)
-            self.pipeline.send(text, level="loud", code_lines=[candidate])
+            self.pipeline.send(text, level="loud", code_lines=[candidate],
+                               category="launch")
         else:
             self.pipeline.send(
                 f"NEW TOKEN VIA NEW FACTORY\n{candidate}\n"
                 f"{name} ({symbol}) | supply: {supply}\nfactory: {factory}\n"
                 f"token: {config.BLOCKSCOUT_TOKEN_URL.format(ca=candidate)}\n"
-                f"tx: {tx_link}", level="loud", code_lines=[candidate])
+                f"tx: {tx_link}", level="loud", code_lines=[candidate],
+                category="launch")
 
     # -- LP/market detection on the optional AMM factory ---------------------
     def scan_amm_factory(self, head: int) -> None:

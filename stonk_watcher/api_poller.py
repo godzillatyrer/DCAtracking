@@ -139,14 +139,16 @@ class ApiPoller:
         raw = {"entry": entry, "detail": detail}
         if clockin:
             text = format_clockin_alert(ca, "api", name, symbol, supply, raw=raw)
-            self.pipeline.send(text, level="loud", code_lines=[ca])
+            self.pipeline.send(text, level="loud", code_lines=[ca],
+                               category="launch")
         else:
             text = (f"NEW LAUNCHER TOKEN (API)\n{ca}\n"
                     f"{name} ({symbol}) | supply: {supply}\n"
                     f"token: {config.BLOCKSCOUT_TOKEN_URL.format(ca=ca)}\n"
                     f"site:  {config.LAUNCHER_PAGE_URL}\n"
                     f"raw:   {json.dumps(raw, separators=(',', ':'))[:1500]}")
-            self.pipeline.send(text, level="alert", code_lines=[ca])
+            self.pipeline.send(text, level="loud", code_lines=[ca],
+                               category="launch")
 
     def _handle_ca_less_entry(self, entry: Dict[str, Any]) -> None:
         digest = str(hash(json.dumps(entry, sort_keys=True)))

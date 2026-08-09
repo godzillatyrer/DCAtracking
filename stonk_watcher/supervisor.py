@@ -104,7 +104,7 @@ class Supervisor:
         dt = (t0 - datetime.now(timezone.utc)).total_seconds()
         when = (f"T0 in {dt / 3600:.1f}h" if dt > 0 else f"T0 was {-dt / 3600:.1f}h ago")
         lines = [f"WATCHER ALIVE — {when}"] + as_checklist(self.state)
-        self.pipeline.send("\n".join(lines), level="info")
+        self.pipeline.send("\n".join(lines), level="info", category="health")
 
     def _console_heartbeat(self) -> None:
         while not self.stop_event.is_set():
@@ -128,7 +128,7 @@ class Supervisor:
             f"T0 = {t0.isoformat()} (CLOCKIN launch window)\n"
             f"components: {', '.join(c.name for c in self.components)}\n"
             + "\n".join(as_checklist(self.state)),
-            level="info")
+            level="info", category="health")
 
         for comp in self.components:
             thread = threading.Thread(target=self._worker, args=(comp,),
@@ -147,7 +147,8 @@ class Supervisor:
         except Exception as exc:
             self.pipeline.send(
                 f"WATCHER CRASHED\n{type(exc).__name__}: {exc}\n"
-                "The watcher process is DOWN — restart it.", level="loud")
+                "The watcher process is DOWN — restart it.", level="loud",
+                category="health")
             raise
         finally:
             self.stop_event.set()
@@ -157,7 +158,7 @@ class Supervisor:
             self.pipeline.send(
                 "WATCHER STOPPED\n"
                 "No further alerts will fire until it is restarted.",
-                level="alert")
+                level="alert", category="health")
 
     def _handle_signal(self, signum, _frame) -> None:
         log.info("received signal %s — shutting down", signum)

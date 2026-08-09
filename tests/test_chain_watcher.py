@@ -77,8 +77,10 @@ def test_contract_creation_enters_candidate_factories(state, pipeline, errors):
 
     assert FACTORY.lower() in state.candidate_factories()
     assert state.candidate_factories()[FACTORY.lower()]["deploy_block"] == 900
-    loud = pipeline.find("TEAM WALLET DEPLOYED A CONTRACT")
-    assert loud and loud[0]["level"] == "loud"
+    # Still detected and armed internally, but categorised as recon so it
+    # does not reach the phone in the default launches-only mode.
+    deploy = pipeline.find("TEAM WALLET DEPLOYED A CONTRACT")
+    assert deploy and deploy[0]["category"] == "recon"
 
     # Topic-agnostic scan ran against the new factory (no topic filter).
     scans = [c for c in watcher.rpc.get_logs_calls
@@ -103,7 +105,11 @@ def test_token_discovery_from_raw_logs(state, pipeline, errors):
     assert pipeline.find("CANDIDATE FACTORY ACTIVITY")
     discovery = pipeline.find("NEW TOKEN VIA NEW FACTORY")
     assert discovery and discovery[0]["level"] == "loud"
+    assert discovery[0]["category"] == "launch", "must survive the filter"
     assert "MANCER" in discovery[0]["text"]
+    # Supporting signals are recon: real detection, but not phone-worthy.
+    activity = pipeline.find("CANDIDATE FACTORY ACTIVITY")
+    assert activity and activity[0]["category"] == "recon"
     assert state.is_tracked(TOKEN)
     assert state.data["tracked"][TOKEN]["source"] == "chain"
     # topic0 learned for cheaper filtered queries on later launches.
