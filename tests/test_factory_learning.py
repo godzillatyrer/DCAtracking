@@ -49,6 +49,24 @@ def test_factory_learned_from_api_token(state, pipeline, errors):
     assert learned and learned[0]["category"] == "health"
 
 
+def test_non_api_tokens_never_teach_a_factory(state, pipeline, errors):
+    """Reproduction of the production incident: tokens tracked by the
+    removed mint watch (VERTO, BOT, steakUSDG) taught generic memecoin
+    factories. Only API-listed tokens carry launchpad provenance."""
+    state.add_tracked(TOKEN, source="mint", name="VERTO", symbol="VERTO")
+    other = "0xbeef000000000000000000000000000000000001"
+    state.add_tracked(other, source="chain", name="X", symbol="X")
+    bs = CreatorBlockscout(
+        creators={TOKEN: {"creator": FACTORY, "block": 500},
+                  other: {"creator": FACTORY, "block": 501}},
+        contracts=[FACTORY])
+    make_watcher(state, pipeline, errors, bs).learn_factories_from_tracked(head=1000)
+
+    assert not state.candidate_factories(), (
+        "a token of non-API provenance must never arm a factory")
+    assert not pipeline.find("LEARNED LAUNCHER FACTORY")
+
+
 def test_eoa_deployed_token_does_not_arm_a_factory(state, pipeline, errors):
     """A hand-deployed token has no factory behind it — arming the EOA would
     watch a wallet, not a launchpad."""

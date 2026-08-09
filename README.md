@@ -39,6 +39,13 @@ token *is* the launcher factory, so its address is resolved via Blockscout
 and armed automatically. From then on every launch is caught from the
 factory's logs — ahead of the API, with no chain-wide guessing.
 
+Factory learning is strictly gated on API provenance: a token tracked for
+any other reason (historical state, chain scans) can never teach a factory.
+Each armed factory records *why* it is armed (`team_wallet`, `config`, or
+`learned_from_api`), and a schema migration purges anything armed without
+recorded provenance — which is how the one-time cleanup of pre-fix state
+happens automatically on the next boot.
+
 A token deployed by an EOA rather than a contract arms nothing: that's a
 hand-deployment, not a launchpad, and watching the wallet would reintroduce
 exactly the noise this design exists to avoid.
