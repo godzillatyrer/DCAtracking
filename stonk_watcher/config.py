@@ -150,6 +150,12 @@ BORING_ADDRESSES = {
     "0x000000000022d473030f116ddee9f6b43ac78ba3",  # Permit2
     "0x4e59b44847b379578588920ca78fbf26c0b4956c",  # deterministic deployer
     "0x00000000000000adc04c56bf30ac9d3c0aaf14dc",  # Seaport 1.5
+    # Stonk Launcher quote/pair assets, verified from the site bundle. The
+    # factory indexes these in its logs constantly; they are never launches.
+    "0x5fc5360d0400a0fd4f2af552add042d716f1d168",  # USDG
+    "0xe934e36a439c94017b64a3fece66af12099abf50",  # $STONKBROKER
+    "0x0bd7d308f8e1639fab988df18a8011f41eacad73",  # WETH9
+    "0x55642a3f10f1af5145d3d59021b1d6b03bb8692c",  # Clock In fee router
 }
 
 # --- Alert channels ---------------------------------------------------------

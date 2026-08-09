@@ -211,6 +211,9 @@ class State:
             self.mark_dirty()
             return True
 
+    def is_known_launcher_factory(self, addr: str) -> bool:
+        return addr.lower() in self.data["candidate_factories"]
+
     def candidate_factories(self) -> Dict[str, Dict[str, Any]]:
         return self.data["candidate_factories"]
 
