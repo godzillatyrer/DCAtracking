@@ -222,3 +222,45 @@ def test_unindexed_creation_is_retried_not_lost(state, pipeline, errors):
     clockin = pipeline.find("*** CLOCKIN ***")
     assert clockin and clockin[0]["category"] == "launch"
     assert TOKEN not in state.candidate_factories()[FACTORY.lower()].get("pending", {})
+
+
+def test_blockscout_outage_does_not_drop_a_launch(state, pipeline, errors):
+    """The exact production scenario: Blockscout 500s/timeouts while a launch
+    is emitted. The factory log is already marked seen, so a bare return
+    would lose the token permanently."""
+    import requests as _requests
+
+    state.add_candidate_factory(FACTORY, 900, source="team_wallet")
+    logs = {FACTORY.lower(): [
+        factory_log("0xdown1", [TOPIC_MARKET_CREATED, pad_address(TOKEN)])]}
+
+    class DownBlockscout(FakeBlockscout):
+        down = True
+
+        def classify_address(self, address):
+            if self.down:
+                raise _requests.RequestException("500 Server Error")
+            return super().classify_address(address)
+
+        def creation_info(self, address):
+            if self.down:
+                raise _requests.RequestException("Read timed out")
+            return super().creation_info(address)
+
+    bs = DownBlockscout(tokens={TOKEN: {"name": "CLOCKIN", "symbol": "CLOCKIN"}},
+                        creators={TOKEN: {"creator": FACTORY, "block": 900}})
+    watcher = make_watcher(state, pipeline, errors,
+                           rpc=FakeRpc(logs_by_address=logs), blockscout=bs)
+
+    watcher.run_once()  # outage: no alert, but the candidate must be retained
+    assert not pipeline.find("*** CLOCKIN ***")
+    pending = state.candidate_factories()[FACTORY.lower()]["pending"]
+    assert TOKEN in pending, "an outage must not discard the candidate"
+    assert pending[TOKEN]["attempts"] == 0, (
+        "transport failure must not consume the retry budget")
+
+    bs.down = False
+    watcher.run_once()  # recovered: the launch alert finally fires
+    clockin = pipeline.find("*** CLOCKIN ***")
+    assert clockin and clockin[0]["category"] == "launch"
+    assert TOKEN not in state.candidate_factories()[FACTORY.lower()].get("pending", {})
