@@ -124,6 +124,27 @@ class ChainWatcher:
             self._process_factory_logs(factory, fstate, logs)
         self.state.save_if_dirty()
 
+    def _queue_pending(self, fstate: Dict[str, Any], candidate: str,
+                       topic0: str, tx_link: str,
+                       count_attempt: bool = True) -> None:
+        """Defer a candidate for re-checking on a later cycle.
+
+        count_attempt=False for transport failures: Blockscout being
+        unreachable is no evidence about the token, so an outage must not
+        burn through the retry budget the way genuine indexing lag does.
+        """
+        pending = fstate.setdefault("pending", {})
+        attempts = pending.get(candidate, {}).get("attempts", 0)
+        if attempts >= PENDING_MAX_ATTEMPTS:
+            return
+        pending[candidate] = {
+            "topic0": topic0, "tx_link": tx_link,
+            "attempts": attempts + 1 if count_attempt else attempts,
+        }
+        self.state.mark_dirty()
+        log.info("queued %s for retry (%d/%d)", candidate,
+                 pending[candidate]["attempts"], PENDING_MAX_ATTEMPTS)
+
     def _retry_pending(self, factory: str, fstate: Dict[str, Any]) -> None:
         """Re-check candidates whose creation Blockscout had not yet indexed."""
         for candidate, info in list(fstate.get("pending", {}).items()):
@@ -175,7 +196,13 @@ class ChainWatcher:
         try:
             info = self.blockscout.classify_address(candidate)
         except requests.RequestException as exc:
+            # The log is already marked seen, so returning here would drop
+            # this candidate forever. Blockscout on this chain flaps (500s
+            # and read timeouts), and an outage during the launch window is
+            # exactly when a real token would be lost. Queue it instead.
             self._blockscout_failure(exc)
+            self._queue_pending(fstate, candidate, topic0, tx_link,
+                                count_attempt=False)
             return
         self._blockscout_ok()
         token = info.get("token")
@@ -191,6 +218,8 @@ class ChainWatcher:
             creation = self.blockscout.creation_info(candidate)
         except requests.RequestException as exc:
             self._blockscout_failure(exc)
+            self._queue_pending(fstate, candidate, topic0, tx_link,
+                                count_attempt=False)
             return
         creator = (creation.get("creator") or "").lower()
         if creator and creator != factory.lower():
@@ -198,17 +227,10 @@ class ChainWatcher:
                      candidate, factory, creator)
             return
         if not creator:
-            # Blockscout has not indexed the creation yet. The log itself is
-            # already marked seen, so queue an explicit retry — otherwise a
-            # real launch caught during indexing lag is lost forever.
-            pending = fstate.setdefault("pending", {})
-            attempts = pending.get(candidate, {}).get("attempts", 0)
-            if attempts < PENDING_MAX_ATTEMPTS:
-                pending[candidate] = {"topic0": topic0, "tx_link": tx_link,
-                                      "attempts": attempts + 1}
-                self.state.mark_dirty()
-                log.info("creation of %s not indexed yet; queued retry %d/%d",
-                         candidate, attempts + 1, PENDING_MAX_ATTEMPTS)
+            # Blockscout answered but has not indexed the creation yet. The
+            # log itself is already marked seen, so queue an explicit retry —
+            # otherwise a real launch caught during indexing lag is lost.
+            self._queue_pending(fstate, candidate, topic0, tx_link)
             return
         fstate.get("pending", {}).pop(candidate, None)
 
