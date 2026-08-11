@@ -27,6 +27,8 @@ def _default_state() -> Dict[str, Any]:
         "dev_wallets": {},                # wallet -> {baselined, seen_tx_hashes}
         "candidate_factories": {},        # addr -> {deploy_block, last_scanned, learned_topic0, confirmed_tokens, seen_log_keys}
         "amm_last_scanned": None,         # block cursor for optional AMM factory watch
+        "lp_locks": {},                   # locker addr -> block cursor
+        "lp_lock_seen": [],               # dedupe for lock events
         # Track 3
         "frontend": {
             "deployment_id": None,
@@ -210,6 +212,13 @@ class State:
             }
             self.mark_dirty()
             return True
+
+    def set_factory_field(self, addr: str, key: str, value: Any) -> None:
+        with _LOCK:
+            entry = self.data["candidate_factories"].get(addr.lower())
+            if entry is not None:
+                entry[key] = value
+                self.mark_dirty()
 
     def is_known_launcher_factory(self, addr: str) -> bool:
         return addr.lower() in self.data["candidate_factories"]

@@ -70,6 +70,48 @@ Known quote/pair assets (USDG, `$STONKBROKER`, WETH9) and the Clock In fee
 router are permanently ignored: the factory indexes them constantly and they
 are never launches.
 
+### Catching the LauncherFactory deploy
+
+The mainnet LauncherFactory address is unpublished — the docs list every
+other contract and leave this one blank. So it is caught at deploy time,
+three ways:
+
+1. **Internal transactions.** A contract deployed from inside a call leaves
+   no top-level creation tx, so the `/transactions` feed alone would miss it.
+   `/internal-transactions` is polled for both team wallets.
+2. **ABI identification.** Every new contract from a team wallet is checked
+   against Blockscout's verified source. One exposing `createLaunch`,
+   `finalizeLaunch` or `launchToken` **is** the LauncherFactory by its own
+   declaration, and fires `*** LAUNCHER FACTORY FOUND ***`.
+3. **The site bundle** (above), which usually publishes it first.
+
+`CollectionTokenDeployer` (`0x662003BF…`) is armed at startup: it has already
+created 40 tokens including several CLOCKIN variants, so it is a confirmed
+launch source rather than a guess.
+
+**LP locks** in the Safety Deposit Box (V3 `0xfc96cf67…`, V4 `0x5a28ce09…`)
+are watched with keccak-verified topics. A lock means liquidity was just
+committed for a token — the strongest launch signal the ecosystem emits.
+
+### Ticker collisions — why a name match is never enough
+
+Six CLOCKIN variants already exist on the StonkBrokers factory, with supplies
+of 1,000,000 / 31,536,000 / 568,554,987 / 20,444,424 / 1,000,000,000 /
+1,000,000 — and another squats on pools.fun. The supply was still changing
+hours before launch.
+
+So the ticker alone confirms nothing. Provenance decides whether a token
+alerts at all; the name only escalates the alert. Set `EXPECTED_SUPPLY` and
+a name match is graded **CONFIRMED** or **CANDIDATE — SPEC MISMATCH** with
+the delta shown. A mismatch is never silently upgraded.
+
+### pools.fun is a separate ecosystem
+
+`PartyFactory` (`0x626C3d09…`) produced 196 tokens in 85 minutes, one wallet
+minting 52 of them at 2–3 second intervals. It shares the chain and nothing
+else — no on-chain link to StonkBrokers, different owner. It is excluded
+outright, along with the testnet contracts the docs warn against.
+
 ### If you learn the factory address early
 
 Put it in `WATCH_CONTRACTS` (comma-separated) and the watcher scans all of

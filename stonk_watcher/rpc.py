@@ -21,7 +21,7 @@ class RpcClient:
         self.url = url or config.RPC_URL
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json",
-                                     "User-Agent": config.BROWSER_USER_AGENT})
+                                     "User-Agent": config.RPC_USER_AGENT})
         self.consecutive_failures = 0
 
     def call(self, method: str, params: Optional[list] = None, retries: int = 3) -> Any:

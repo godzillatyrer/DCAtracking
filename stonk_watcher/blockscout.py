@@ -42,6 +42,47 @@ class BlockscoutClient:
             return []
         return data.get("items", []) or []
 
+    def internal_transactions(self, address: str) -> List[Dict[str, Any]]:
+        """Internal txs for an address.
+
+        A factory deployed from inside a contract call produces no top-level
+        creation tx, so /transactions alone misses it entirely. The
+        LauncherFactory deploy is the single most important event to catch,
+        which makes this feed non-optional.
+        """
+        data = self._get(f"addresses/{address}/internal-transactions")
+        if not data:
+            return []
+        return data.get("items", []) or []
+
+    def smart_contract(self, address: str) -> Optional[Dict[str, Any]]:
+        """Verified-source metadata, including the ABI when available."""
+        return self._get(f"smart-contracts/{address}")
+
+    def identify_launcher(self, address: str) -> Dict[str, Any]:
+        """Positively identify the LauncherFactory from its own ABI.
+
+        A contract exposing createLaunch/finalizeLaunch/launchToken IS the
+        launcher, by declaration rather than inference. Returns
+        {is_launcher, name, markers} — all falsy when unverified, which is
+        not evidence against it, only absence of proof.
+        """
+        try:
+            info = self.smart_contract(address)
+        except requests.RequestException:
+            return {"is_launcher": False, "name": None, "markers": [], "known": False}
+        if not info:
+            return {"is_launcher": False, "name": None, "markers": [], "known": False}
+        abi = info.get("abi") or []
+        names = {entry.get("name") for entry in abi if isinstance(entry, dict)}
+        markers = [m for m in config.LAUNCHER_ABI_MARKERS if m in names]
+        return {
+            "is_launcher": bool(markers),
+            "name": info.get("name"),
+            "markers": markers,
+            "known": True,
+        }
+
     def creation_info(self, address: str) -> Dict[str, Any]:
         """Who deployed this contract, and in which block.
 

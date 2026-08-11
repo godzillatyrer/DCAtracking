@@ -10,11 +10,12 @@ is *not* working, not just when it finds something.
 import html
 import json
 import logging
+import re
 import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -178,11 +179,15 @@ def format_clockin_alert(ca: str, source: str, name: str = "?", symbol: str = "?
                          supply: str = "?", tx_link: Optional[str] = None,
                          raw: Optional[Any] = None) -> str:
     """CLOCKIN alert optimized for copy-paste speed: bare CA is line one."""
+    verdict, note = verdict_for_target(supply)
+    banner = {"confirmed": "CONFIRMED", "mismatch": "CANDIDATE",
+              "unknown": "CANDIDATE"}[verdict]
     lines = [
         ca,
-        f"*** {config.TARGET_TOKEN_NAME} *** detected via {source}",
+        f"*** {config.TARGET_TOKEN_NAME} *** {banner} — detected via {source}",
         ca,
         f"{name} ({symbol}) | supply: {supply}",
+        f"check: {note}",
         f"token: {config.BLOCKSCOUT_TOKEN_URL.format(ca=ca)}",
         f"site:  {config.LAUNCHER_PAGE_URL}",
     ]
@@ -203,6 +208,43 @@ def is_target_token(name: Optional[str], symbol: Optional[str]) -> bool:
         if value and str(value).strip().lstrip("$").lower() == target:
             return True
     return False
+
+
+def is_test_token(name: Optional[str], symbol: Optional[str]) -> bool:
+    """Deliberate test deploys — the team has shipped several."""
+    pattern = re.compile(config.TEST_TOKEN_PATTERN, re.I)
+    return any(pattern.search(str(v)) for v in (name, symbol) if v)
+
+
+def verdict_for_target(supply: Optional[str]) -> Tuple[str, str]:
+    """Grade a name-matching token against the expected spec.
+
+    A symbol match is a weak signal here: six CLOCKIN variants already exist
+    on the StonkBrokers factory (supplies from 1e6 to 1e9) and another squats
+    on pools.fun. So the name never confirms anything on its own — it only
+    escalates. Set EXPECTED_SUPPLY to make this decisive.
+
+    Returns (verdict, note); verdict is "confirmed", "mismatch" or "unknown".
+    A mismatch is never silently upgraded to confirmed.
+    """
+    expected = config.EXPECTED_SUPPLY
+    if not expected:
+        return ("unknown",
+                "supply not verified (set EXPECTED_SUPPLY to confirm — "
+                "several CLOCKIN tickers exist on this chain)")
+    actual = str(supply or "").strip()
+    if not actual or actual == "?":
+        return "unknown", f"supply unavailable; expected {expected}"
+    if _same_number(actual, expected):
+        return "confirmed", f"supply matches expected {expected}"
+    return "mismatch", f"SPEC MISMATCH — supply {actual}, expected {expected}"
+
+
+def _same_number(a: str, b: str) -> bool:
+    try:
+        return int(a) == int(b)
+    except (TypeError, ValueError):
+        return a.strip() == b.strip()
 
 
 class ErrorReporter:
