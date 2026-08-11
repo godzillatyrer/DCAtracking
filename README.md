@@ -101,9 +101,44 @@ of 1,000,000 / 31,536,000 / 568,554,987 / 20,444,424 / 1,000,000,000 /
 hours before launch.
 
 So the ticker alone confirms nothing. Provenance decides whether a token
-alerts at all; the name only escalates the alert. Set `EXPECTED_SUPPLY` and
-a name match is graded **CONFIRMED** or **CANDIDATE — SPEC MISMATCH** with
-the delta shown. A mismatch is never silently upgraded.
+alerts at all; the name only escalates the alert. Expected supplies are
+per-symbol, so a name match is graded **CONFIRMED** or **CANDIDATE — SPEC
+MISMATCH** with the delta shown, and a mismatch is never silently upgraded.
+
+| Symbol | Expected supply | Status |
+|---|---|---|
+| `YARD` | 1,999,999,980 | built in — the TICKERYARD test deploy at `0x996cbbA6…` carries 10,000,000,000 and is correctly graded a mismatch |
+| `CLOCKIN` | unknown | stays **CANDIDATE** until you set it |
+
+Add more with `EXPECTED_SUPPLIES=CLOCKIN:1000000000,FOO:99` (env entries win
+over built-ins). A symbol with no expected supply is never reported as
+confirmed — silence about a fact we don't have beats a false CONFIRMED.
+
+### up. DEX (`up33.xyz`) — supported, but not built in
+
+Launcher graduates are expected to get liquidity and a gauge on up. after
+bonding, which makes gauge/pool creation there a **graduation** signal.
+
+Two reasons there is no dedicated module:
+
+1. **It is a late signal, not an early one.** Bonding completes well after
+   the token exists, so up. would tell you a token *graduated*, not that it
+   just launched — and the CA is what matters at T0.
+2. **The addresses are not published.** up. runs Slipstream, which is not
+   ABI-compatible with Uniswap V3 (pools are keyed by `int24 tickSpacing`,
+   never `uint24 fee`, and swap fees are governance-tunable, so they must be
+   read live rather than from a static tier table). Guessing a factory
+   address would be worse than having none.
+
+**No code is needed to enable it.** `WATCH_CONTRACTS` scans any contract
+topic-agnostically, so once you have the up. factory or voter address:
+
+```
+WATCH_CONTRACTS=0xUpFactoryAddress
+```
+
+It is armed on the next cycle, and any token it emits is confirmed through
+the same creation check as every other factory.
 
 ### pools.fun is a separate ecosystem
 

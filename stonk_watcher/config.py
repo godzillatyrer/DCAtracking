@@ -5,6 +5,7 @@ project root (simple KEY=VALUE lines; real environment variables win).
 """
 import os
 from datetime import datetime, timezone
+from typing import Optional
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -85,10 +86,38 @@ def get_t0() -> datetime:
 TARGET_TOKEN_NAME = env("TARGET_TOKEN_NAME", "CLOCKIN")
 # Ticker collisions are severe on this chain: six CLOCKIN variants already
 # exist on the StonkBrokers factory (supplies 1e6 to 1e9) plus a squat on
-# pools.fun. A symbol match alone therefore confirms nothing. Set this to
-# the real token's total supply and a name match is graded CONFIRMED or
-# CANDIDATE - SPEC MISMATCH instead of being trusted blindly.
+# pools.fun. A symbol match alone therefore confirms nothing.
+#
+# Per-symbol expected total supply, so several tokens can be graded at once.
+# A symbol with a known supply is graded CONFIRMED or CANDIDATE - SPEC
+# MISMATCH; one without stays CANDIDATE rather than being trusted blindly.
+# Extend with EXPECTED_SUPPLIES=SYM:123,OTHER:456 (env entries win).
+EXPECTED_SUPPLIES = {
+    # Confirmed by the user. Note the TICKERYARD test deploy at
+    # 0x996cbbA6d831D58842C63EdF0dbc625F3f67Df9B carries 10,000,000,000 and
+    # is NOT the live token — this is exactly what the grading catches.
+    "YARD": "1999999980",
+}
+for _pair in env("EXPECTED_SUPPLIES").split(","):
+    if ":" in _pair:
+        _sym, _, _sup = _pair.partition(":")
+        if _sym.strip() and _sup.strip():
+            EXPECTED_SUPPLIES[_sym.strip().lstrip("$").upper()] = _sup.strip()
+
+# Fallback applied when the symbol has no entry above.
 EXPECTED_SUPPLY = env("EXPECTED_SUPPLY")
+
+
+def expected_supply_for(symbol: Optional[str] = None,
+                        name: Optional[str] = None) -> str:
+    """Expected supply for a token, by symbol then name, else the fallback."""
+    for value in (symbol, name):
+        if not value:
+            continue
+        key = str(value).strip().lstrip("$").upper()
+        if key in EXPECTED_SUPPLIES:
+            return EXPECTED_SUPPLIES[key]
+    return EXPECTED_SUPPLY
 
 # What reaches your phone.
 #   "launches" (default) — only actual token launches, plus watcher-health
