@@ -225,3 +225,39 @@ def test_test_deploys_are_recognised():
     assert is_test_token("scram test", None)
     assert is_test_token(None, "DONOTBUY")
     assert not is_test_token("CLOCKIN", "CLOCKIN")
+
+
+def test_yard_supply_is_known_and_grades_the_test_deploy():
+    """YARD's real supply is 1,999,999,980. The TICKERYARD test deploy at
+    0x996cbbA6… carries 10,000,000,000 and must never read as confirmed."""
+    from stonk_watcher.alerts import verdict_for_target
+    assert config.expected_supply_for("YARD") == "1999999980"
+    assert verdict_for_target("1999999980", "YARD")[0] == "confirmed"
+    verdict, note = verdict_for_target("10000000000", "YARD")
+    assert verdict == "mismatch"
+    assert "1999999980" in note
+
+
+def test_symbol_lookup_is_case_and_prefix_insensitive():
+    assert config.expected_supply_for("$yard") == "1999999980"
+    assert config.expected_supply_for(" YARD ") == "1999999980"
+
+
+def test_unknown_symbol_stays_candidate():
+    """CLOCKIN's real supply is not known, so it must not be confirmed."""
+    from stonk_watcher.alerts import verdict_for_target
+    assert not config.expected_supply_for("CLOCKIN")
+    assert verdict_for_target("1000000", "CLOCKIN")[0] == "unknown"
+
+
+def test_env_can_add_symbols(monkeypatch):
+    import importlib
+    monkeypatch.setenv("EXPECTED_SUPPLIES", "CLOCKIN:123456,$FOO:99")
+    cfg = importlib.reload(config)
+    try:
+        assert cfg.expected_supply_for("CLOCKIN") == "123456"
+        assert cfg.expected_supply_for("FOO") == "99"
+        assert cfg.expected_supply_for("YARD") == "1999999980", "builtin kept"
+    finally:
+        monkeypatch.delenv("EXPECTED_SUPPLIES", raising=False)
+        importlib.reload(config)

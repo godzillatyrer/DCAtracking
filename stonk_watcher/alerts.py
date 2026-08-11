@@ -179,7 +179,7 @@ def format_clockin_alert(ca: str, source: str, name: str = "?", symbol: str = "?
                          supply: str = "?", tx_link: Optional[str] = None,
                          raw: Optional[Any] = None) -> str:
     """CLOCKIN alert optimized for copy-paste speed: bare CA is line one."""
-    verdict, note = verdict_for_target(supply)
+    verdict, note = verdict_for_target(supply, symbol, name)
     banner = {"confirmed": "CONFIRMED", "mismatch": "CANDIDATE",
               "unknown": "CANDIDATE"}[verdict]
     lines = [
@@ -216,7 +216,8 @@ def is_test_token(name: Optional[str], symbol: Optional[str]) -> bool:
     return any(pattern.search(str(v)) for v in (name, symbol) if v)
 
 
-def verdict_for_target(supply: Optional[str]) -> Tuple[str, str]:
+def verdict_for_target(supply: Optional[str], symbol: Optional[str] = None,
+                       name: Optional[str] = None) -> Tuple[str, str]:
     """Grade a name-matching token against the expected spec.
 
     A symbol match is a weak signal here: six CLOCKIN variants already exist
@@ -227,11 +228,11 @@ def verdict_for_target(supply: Optional[str]) -> Tuple[str, str]:
     Returns (verdict, note); verdict is "confirmed", "mismatch" or "unknown".
     A mismatch is never silently upgraded to confirmed.
     """
-    expected = config.EXPECTED_SUPPLY
+    expected = config.expected_supply_for(symbol, name)
     if not expected:
         return ("unknown",
-                "supply not verified (set EXPECTED_SUPPLY to confirm — "
-                "several CLOCKIN tickers exist on this chain)")
+                f"supply not verified (add {(symbol or 'SYMBOL').upper()} to "
+                "EXPECTED_SUPPLIES to confirm — duplicate tickers exist here)")
     actual = str(supply or "").strip()
     if not actual or actual == "?":
         return "unknown", f"supply unavailable; expected {expected}"
