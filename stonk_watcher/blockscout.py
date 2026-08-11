@@ -42,6 +42,19 @@ class BlockscoutClient:
             return []
         return data.get("items", []) or []
 
+    def transaction_token_transfers(self, tx_hash: str) -> List[Dict[str, Any]]:
+        """Token transfers inside one transaction.
+
+        LP-lock events carry position IDs and an owner, never the token
+        address. The tokens are recoverable from the same transaction's
+        transfers, which is what turns a bare tx link into a copy-pasteable
+        contract address.
+        """
+        data = self._get(f"transactions/{tx_hash}/token-transfers")
+        if not data:
+            return []
+        return data.get("items", []) or []
+
     def internal_transactions(self, address: str) -> List[Dict[str, Any]]:
         """Internal txs for an address.
 

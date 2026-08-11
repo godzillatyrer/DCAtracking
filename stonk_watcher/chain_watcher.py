@@ -18,7 +18,8 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from . import config
-from .alerts import AlertPipeline, ErrorReporter, format_clockin_alert, is_target_token
+from .alerts import (AlertPipeline, ErrorReporter, format_clockin_alert,
+                     is_target_token, verdict_for_target)
 from .blockscout import BlockscoutClient, tx_block_number, tx_creates_contract
 from .rpc import RpcClient, RpcError, topic_to_address
 from .state import State
@@ -215,14 +216,7 @@ class ChainWatcher:
                     owner = topic_to_address(topic)
                     if owner:
                         break
-                self.pipeline.send(
-                    f"LP LOCKED — {label}\n"
-                    f"owner: {owner or 'unknown'}\n"
-                    f"tx: {config.BLOCKSCOUT_TX_URL.format(tx=tx_hash)}\n"
-                    "Liquidity was just locked in the Safety Deposit Box. "
-                    "This is the strongest launch signal on the ecosystem — "
-                    "open the tx to see which token.",
-                    level="loud", category="launch")
+                self._alert_lp_lock(label, owner, tx_hash)
         self.state.save_if_dirty()
 
     # -- 2b: candidate factories ---------------------------------------------
@@ -433,6 +427,72 @@ class ChainWatcher:
                 f"scanning all logs from block {start}.",
                 level="info", category="health")
         self.state.save_if_dirty()
+
+    def _tokens_in_tx(self, tx_hash: str) -> List[Dict[str, str]]:
+        """Distinct non-quote tokens moved by a transaction.
+
+        Quote assets (WETH, USDG, $STONKBROKER) are in BORING_ADDRESSES, so
+        what survives is the token actually being launched or locked.
+        """
+        try:
+            items = self.blockscout.transaction_token_transfers(tx_hash)
+        except requests.RequestException as exc:
+            self._blockscout_failure(exc)
+            return []
+        self._blockscout_ok()
+        out: List[Dict[str, str]] = []
+        seen = set()
+        for item in items:
+            token = item.get("token") or {}
+            addr = str(token.get("address") or token.get("address_hash")
+                       or "").lower()
+            if (not addr or addr in seen or addr in config.BORING_ADDRESSES
+                    or addr in config.NON_POOL_RECIPIENTS):
+                continue
+            seen.add(addr)
+            out.append({"address": addr,
+                        "name": str(token.get("name") or "?"),
+                        "symbol": str(token.get("symbol") or "?")})
+        return out
+
+    def _alert_lp_lock(self, label: str, owner: Optional[str],
+                       tx_hash: str) -> None:
+        tx_link = config.BLOCKSCOUT_TX_URL.format(tx=tx_hash)
+        tokens = self._tokens_in_tx(tx_hash)
+        if not tokens:
+            # Resolution failed or the tx moved only quote assets. Still
+            # worth sending — the lock itself is the signal.
+            self.pipeline.send(
+                f"LP LOCKED — {label}\n"
+                f"owner: {owner or 'unknown'}\n"
+                f"tx: {tx_link}\n"
+                "Liquidity locked in the Safety Deposit Box. Token address "
+                "could not be resolved — open the tx to see which token.",
+                level="loud", category="launch")
+            return
+
+        primary = tokens[0]
+        ca = primary["address"]
+        clockin = is_target_token(primary["name"], primary["symbol"])
+        verdict, note = verdict_for_target("?", primary["symbol"], primary["name"])
+        headline = (f"*** {config.TARGET_TOKEN_NAME} *** LP LOCKED"
+                    if clockin else "LP LOCKED")
+        lines = [
+            ca,                       # bare CA first, for copy-paste speed
+            f"{headline} — {primary['symbol']}",
+            ca,
+            f"{primary['name']} ({primary['symbol']})",
+            f"locker: {label}",
+            f"owner: {owner or 'unknown'}",
+            f"token: {config.BLOCKSCOUT_TOKEN_URL.format(ca=ca)}",
+            f"tx:    {tx_link}",
+        ]
+        if clockin:
+            lines.insert(4, f"check: {note}")
+        for extra in tokens[1:]:
+            lines.append(f"also in tx: {extra['symbol']} {extra['address']}")
+        self.pipeline.send("\n".join(lines), level="loud",
+                           code_lines=[ca], category="launch")
 
     # -- liquidity seeding on up. (or any venue) -----------------------------
     def scan_tracked_liquidity(self, head: int) -> None:
