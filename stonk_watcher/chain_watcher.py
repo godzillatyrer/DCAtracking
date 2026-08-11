@@ -434,6 +434,108 @@ class ChainWatcher:
                 level="info", category="health")
         self.state.save_if_dirty()
 
+    # -- liquidity seeding on up. (or any venue) -----------------------------
+    def scan_tracked_liquidity(self, head: int) -> None:
+        """Detect LP being seeded for a launchpad token, on any DEX.
+
+        up.'s factory address is unpublished, so this watches from the
+        token's side instead: Transfer events emitted by tokens already
+        confirmed as launchpad tokens. The first transfer into a contract is
+        the pool being funded. Venue-agnostic, and provenance-safe because
+        the address filter is the confirmed-token list itself — an unrelated
+        memecoin getting liquidity can never appear here.
+        """
+        if not config.LIQUIDITY_WATCH:
+            return
+        tracked = list(self.state.data["tracked"])
+        if not tracked:
+            return
+        cursor = self.state.data.get("liquidity_last_scanned")
+        if not isinstance(cursor, int):
+            # Arm at head: existing pools are not news.
+            self.state.data["liquidity_last_scanned"] = head
+            self.state.mark_dirty()
+            self.state.save_if_dirty()
+            return
+        if cursor >= head:
+            return
+        try:
+            logs = self.rpc.get_logs_chunked(
+                tracked, cursor + 1, head, topics=[config.TRANSFER_TOPIC0])
+        except RpcError as exc:
+            log.warning("liquidity scan failed: %s", exc)
+            return  # cursor holds so the window is retried
+        self.state.data["liquidity_last_scanned"] = head
+        self.state.mark_dirty()
+
+        checks = 0
+        for entry in logs:
+            token = (entry.get("address") or "").lower()
+            if not self.state.is_tracked(token):
+                continue
+            topics = entry.get("topics") or []
+            if len(topics) < 3:
+                continue
+            recipient = topic_to_address(topics[2])
+            if not recipient:
+                continue
+            if (recipient in config.BORING_ADDRESSES
+                    or recipient in config.NON_POOL_RECIPIENTS
+                    or recipient in self.state.candidate_factories()):
+                continue
+            pools = self.state.data["token_pools"].setdefault(token, [])
+            if recipient in pools:
+                continue
+            if checks >= config.MAX_POOL_CHECKS_PER_CYCLE:
+                log.info("pool-check cap reached; remaining next cycle")
+                break
+            checks += 1
+            self._check_pool_recipient(token, recipient, entry, pools)
+        self.state.save_if_dirty()
+
+    def _check_pool_recipient(self, token: str, recipient: str,
+                              entry: Dict[str, Any], pools: List[str]) -> None:
+        try:
+            info = self.blockscout.classify_address(recipient)
+        except requests.RequestException as exc:
+            self._blockscout_failure(exc)
+            return  # unrecorded, so the next cycle retries
+        self._blockscout_ok()
+        if not info.get("is_contract"):
+            return  # an EOA receiving tokens is a transfer, not a pool
+        pools.append(recipient)
+        self.state.mark_dirty()
+
+        # Name the venue by who deployed the pool. up.'s factory is unknown,
+        # so an unrecognised creator is reported rather than hidden — the
+        # first real graduation is how that address gets learned.
+        venue, creator = "unknown venue", None
+        try:
+            creator = (self.blockscout.creation_info(recipient).get("creator")
+                       or "").lower()
+        except requests.RequestException:
+            creator = None
+        if creator:
+            venue = config.KNOWN_DEX_LABELS.get(creator, f"venue {creator}")
+
+        info_entry = self.state.data["tracked"].get(token, {})
+        symbol = info_entry.get("symbol", "?")
+        name = info_entry.get("name", "?")
+        is_up = "up." in venue
+        hint = ("" if creator in config.KNOWN_DEX_LABELS else
+                "\nUnrecognised pool deployer — if this is up., set "
+                f"UP_DEX_CONTRACTS={creator} to label it in future.")
+        self.pipeline.send(
+            f"LP SEEDED — {symbol}\n{token}\n"
+            f"{name} ({symbol})\n"
+            f"pool: {recipient}\n"
+            f"venue: {venue}\n"
+            f"trade: {config.UP_DEX_URL if is_up else ''}\n"
+            f"token: {config.BLOCKSCOUT_TOKEN_URL.format(ca=token)}\n"
+            f"tx: {config.BLOCKSCOUT_TX_URL.format(tx=entry.get('transactionHash', '?'))}"
+            f"{hint}",
+            level="loud", code_lines=[token], category="launch")
+
     # -- learn the real factory from a confirmed launchpad token -------------
     def learn_factories_from_tracked(self, head: int) -> None:
         """Resolve the creator of every confirmed launchpad token and arm it.
@@ -558,6 +660,7 @@ class ChainWatcher:
             self.seed_watched_contracts(head)
             self.learn_factories_from_tracked(head)
             self.scan_lp_locks(head)
+            self.scan_tracked_liquidity(head)
             self.scan_candidate_factories(head)
             self.scan_amm_factory(head)
 

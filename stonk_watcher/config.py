@@ -201,6 +201,37 @@ PARTY_SWAP_ROUTER = "0xe01020e83257bab1833d1ce052c572fcbcbf0cb8"
 
 # Names that mark a deliberate test deploy; the team has shipped several.
 TEST_TOKEN_PATTERN = env("TEST_TOKEN_PATTERN", r"test|tstdonotbuy|donotbuy|scram")
+
+# --- Liquidity seeding (up. DEX and any other venue) ------------------------
+# Launchpad tokens are seeded for LP on up. (up33.xyz) after bonding, but
+# up.'s factory address is unpublished. Rather than guess it, liquidity is
+# detected from the TOKEN's side: watch Transfer events emitted by tokens we
+# already confirmed are launchpad tokens, and flag the first transfer into a
+# contract. That contract is the pool. This is venue-agnostic — it works for
+# up., Uniswap V3, or anything else — and stays provenance-safe because only
+# already-confirmed launchpad tokens are ever watched.
+LIQUIDITY_WATCH = env_bool("LIQUIDITY_WATCH", True)
+# ERC-20 Transfer(address indexed from, address indexed to, uint256)
+TRANSFER_TOPIC0 = (
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+# Recipients that are plumbing rather than a pool.
+NON_POOL_RECIPIENTS = set(LP_LOCKERS) | {
+    "0x73991a25c818bf1f1128deaab1492d45638de0d3",  # V3 PositionManager
+    "0x58daec3116aae6d93017baaea7749052e8a04fa7",  # V4 PositionManager
+    "0x8366a39cc670b4001a1121b8f6a443a643e40951",  # V4 PoolManager
+}
+# Labels for pool-deploying factories, so an alert can name the venue. up.'s
+# address is unknown; when a pool's creator is unrecognised the alert reports
+# that address so the venue is learned from the first real graduation.
+KNOWN_DEX_LABELS = {
+    "0x1f7d7550b1b028f7571e69a784071f0205fd2efa": "Uniswap V3",
+}
+for _pair in env("UP_DEX_CONTRACTS").split(","):
+    _addr = _pair.strip().lower()
+    if _addr.startswith("0x") and len(_addr) == 42:
+        KNOWN_DEX_LABELS[_addr] = "up. (up33.xyz)"
+UP_DEX_URL = env("UP_DEX_URL", "https://up33.xyz")
+MAX_POOL_CHECKS_PER_CYCLE = env_int("MAX_POOL_CHECKS_PER_CYCLE", 20)
 _extra_wallets = env("EXTRA_TEAM_WALLETS")
 if _extra_wallets:
     TEAM_WALLETS += [w.strip() for w in _extra_wallets.split(",") if w.strip()]
