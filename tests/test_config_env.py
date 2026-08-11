@@ -40,10 +40,12 @@ def test_real_value_still_wins(monkeypatch):
     assert cfg.RPC_URL == "https://rpc.mainnet.chain.robinhood.com"
 
 
-def test_blank_optional_address_stays_falsy(monkeypatch):
+def test_blank_optional_address_falls_back_to_known_default(monkeypatch):
+    """The Uniswap V3 factory is now known, so blank means "use the verified
+    default", not "disable"."""
     monkeypatch.setenv("AMM_FACTORY_ADDRESS", "")
     cfg = reload_config()
-    assert not cfg.AMM_FACTORY_ADDRESS, "blank AMM factory disables that scan"
+    assert cfg.AMM_FACTORY_ADDRESS == "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
 
 
 def test_cleanup_restores_defaults(monkeypatch):

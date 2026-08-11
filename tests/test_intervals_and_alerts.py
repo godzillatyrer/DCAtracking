@@ -53,7 +53,7 @@ def test_clockin_alert_format():
                                 raw={"a": 1})
     lines = text.splitlines()
     assert lines[0] == CA, "first line must be the bare CA on its own line"
-    assert lines[1] == "*** CLOCKIN *** detected via api"
+    assert lines[1] == "*** CLOCKIN *** CANDIDATE — detected via api"
     assert lines[2] == CA
     assert f"token: {config.BLOCKSCOUT_BASE}/token/{CA}" in text
     assert "site:  https://www.stonkbrokers.cash/launcher" in text

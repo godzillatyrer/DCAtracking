@@ -94,8 +94,9 @@ def test_unknown_creation_block_falls_back_to_lookback(state, pipeline, errors):
     state.add_tracked(TOKEN, source="api", name="CLOCKIN", symbol="CLOCKIN")
     bs = CreatorBlockscout(creators={TOKEN: {"creator": FACTORY, "block": None}},
                            contracts=[FACTORY])
-    make_watcher(state, pipeline, errors, bs).learn_factories_from_tracked(head=9000)
-    expected = 9000 - config.WATCH_CONTRACTS_LOOKBACK
+    head = config.WATCH_CONTRACTS_LOOKBACK + 9000
+    make_watcher(state, pipeline, errors, bs).learn_factories_from_tracked(head=head)
+    expected = head - config.WATCH_CONTRACTS_LOOKBACK
     assert state.candidate_factories()[FACTORY]["deploy_block"] == expected
 
 

@@ -83,6 +83,12 @@ def get_t0() -> datetime:
 
 
 TARGET_TOKEN_NAME = env("TARGET_TOKEN_NAME", "CLOCKIN")
+# Ticker collisions are severe on this chain: six CLOCKIN variants already
+# exist on the StonkBrokers factory (supplies 1e6 to 1e9) plus a squat on
+# pools.fun. A symbol match alone therefore confirms nothing. Set this to
+# the real token's total supply and a name match is graded CONFIRMED or
+# CANDIDATE - SPEC MISMATCH instead of being trusted blindly.
+EXPECTED_SUPPLY = env("EXPECTED_SUPPLY")
 
 # What reaches your phone.
 #   "launches" (default) — only actual token launches, plus watcher-health
@@ -114,21 +120,71 @@ BLOCKSCOUT_BASE = env("BLOCKSCOUT_BASE", "https://robinhoodchain.blockscout.com"
 # have one (lower latency, higher limits).
 RPC_URL = env("RPC_URL", BLOCKSCOUT_BASE + "/api/eth-rpc")
 
+# The RPC rejects the default Python/requests User-Agent with 403. A plain
+# curl UA is what it accepts — using the browser UA here is not safe, and a
+# 403 would silently blind the entire on-chain path.
+RPC_USER_AGENT = env("RPC_USER_AGENT", "curl/8.5.0")
+# Robinhood Chain produces ~250ms blocks (~14,400/hour), so block-count
+# windows are much shorter in wall-clock terms than on a 12s chain.
+BLOCKS_PER_HOUR = 14_400
+# eth_getLogs hard limit on this RPC is 10,000 blocks per call.
+MAX_LOG_WINDOW = 10_000
+
 TEAM_WALLETS = [
-    "0xb668382cF44038a3E8140E789060F6A809787CDa",  # team wallet #1
+    "0xb668382cF44038a3E8140E789060F6A809787CDa",  # MASTER EOA; deployed the token factory
     "0xBe498aad9c6fd0E4Cd6d1E3fBb395026c5D28215",  # team wallet #2 (USDG proxy deployer)
 ]
+
+# Confirmed on-chain StonkBrokers factories, armed at startup. The
+# CollectionTokenDeployer has already created 40 tokens (including several
+# CLOCKIN variants), so it is a real launch source, not a guess.
+KNOWN_STONK_FACTORIES = {
+    "0x662003bf6049e36b4e887d47b8df8718ffbbc6c2": "CollectionTokenDeployer",
+}
+
+# Safety Deposit Box lockers. An LP lock is the strongest launch signal on
+# this ecosystem: it means liquidity was just committed for a token.
+LP_LOCKERS = {
+    "0xfc96cf67ecc55be4adabc3aecbe6ad6349f11223": "StonkLiquidityLocker (V3)",
+    "0x5a28ce098750f73bc9ec142d4bce464e1a0bbda6": "StonkLiquidityLockerV4",
+}
+# keccak-verified topic0s — do not recompute.
+TOPIC_POSITION_LOCKED_V3 = (
+    "0x7a5a16b84333b2656a94dfb32929b9b2b41facdc932c3cf70567b803edc92b8f")
+TOPIC_POSITION_LOCKED_V4 = (
+    "0xb7a1a7a5e8caa86bcc670a4b0a554f0ca0aeae608277451860c6dff33b574e54")
+TOPIC_LOCK_FEES_COLLECTED = (
+    "0x53d5968f2c4070d6fd41f8ac74ba6abeb336da7c5730caa9383551abc20aa15e")
+TOPIC_POOL_CREATED_V3 = (
+    "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118")
+LP_LOCK_TOPICS = {TOPIC_POSITION_LOCKED_V3, TOPIC_POSITION_LOCKED_V4}
+
+# A contract exposing these is the LauncherFactory, by its own ABI. This is
+# a positive identification, not a heuristic.
+LAUNCHER_ABI_MARKERS = ("createLaunch", "finalizeLaunch", "launchToken")
+
+# pools.fun is a SEPARATE ecosystem sharing the chain — 196 tokens in 85
+# minutes, one wallet minting 52 of them at 2-3s intervals. Nothing from it
+# is a StonkBrokers launch, and conflating the two is what produced the
+# earlier alert flood.
+PARTY_FACTORY = "0x626c3d09b65bf5d1d40e0d5f25e19fa49783b3d4"
+PARTY_SWAP_ROUTER = "0xe01020e83257bab1833d1ce052c572fcbcbf0cb8"
+
+# Names that mark a deliberate test deploy; the team has shipped several.
+TEST_TOKEN_PATTERN = env("TEST_TOKEN_PATTERN", r"test|tstdonotbuy|donotbuy|scram")
 _extra_wallets = env("EXTRA_TEAM_WALLETS")
 if _extra_wallets:
     TEAM_WALLETS += [w.strip() for w in _extra_wallets.split(",") if w.strip()]
 
 # Optional: known AMM factory (e.g. AMMFactoryV2). When set, tracked-token
 # LP/market detection watches this factory's logs for tracked CAs.
-AMM_FACTORY_ADDRESS = env("AMM_FACTORY_ADDRESS", "")
-AMM_FACTORY_START_BLOCK = env_int("AMM_FACTORY_START_BLOCK", 29738000)
+AMM_FACTORY_ADDRESS = env(
+    "AMM_FACTORY_ADDRESS", "0x1f7d7550b1b028f7571e69a784071f0205fd2efa")
+# ~85 minutes of history at 250ms blocks; 0 means "recent window from head".
+AMM_FACTORY_START_BLOCK = env_int("AMM_FACTORY_START_BLOCK", 0)
 
 # eth_getLogs chunk size (halved automatically on range errors).
-LOG_CHUNK_SIZE = env_int("LOG_CHUNK_SIZE", 2000)
+LOG_CHUNK_SIZE = min(env_int("LOG_CHUNK_SIZE", 5000), 10_000)
 
 # Extra contracts to watch topic-agnostically, beyond those a team wallet is
 # seen deploying. Add the launcher factory here the moment you learn its
@@ -136,7 +192,7 @@ LOG_CHUNK_SIZE = env_int("LOG_CHUNK_SIZE", 2000)
 # alert) — the watcher picks it up on the next cycle with no restart needed.
 WATCH_CONTRACTS = [a.strip() for a in env("WATCH_CONTRACTS").split(",") if a.strip()]
 # How far back to scan when a contract is added to WATCH_CONTRACTS.
-WATCH_CONTRACTS_LOOKBACK = env_int("WATCH_CONTRACTS_LOOKBACK", 5000)
+WATCH_CONTRACTS_LOOKBACK = env_int("WATCH_CONTRACTS_LOOKBACK", 20000)
 
 # Known-boring addresses ignored by the frontend differ. These are universal
 # infrastructure deployed at the same address on every chain — their presence
@@ -156,6 +212,14 @@ BORING_ADDRESSES = {
     "0xe934e36a439c94017b64a3fece66af12099abf50",  # $STONKBROKER
     "0x0bd7d308f8e1639fab988df18a8011f41eacad73",  # WETH9
     "0x55642a3f10f1af5145d3d59021b1d6b03bb8692c",  # Clock In fee router
+    "0x57c0e45cb534413d1c20a4240955d6bb250bb4f1",  # $UP (up. DEX token)
+    # pools.fun — a separate ecosystem on the same chain, not StonkBrokers.
+    "0x626c3d09b65bf5d1d40e0d5f25e19fa49783b3d4",  # PartyFactory
+    "0xe01020e83257bab1833d1ce052c572fcbcbf0cb8",  # PartySwapRouter
+    # Testnet contracts the docs explicitly warn against using on mainnet.
+    "0x631f9371fd6b2c85f8f61d19a90547ee67fa61a2",  # testnet LauncherFactory
+    "0xfeccb63cd759d768538458ea56f47ea8004323c1",  # testnet V3 factory
+    "0x37e402b8081efce1d82a09a066512278006e4691",  # testnet WETH9
 }
 
 # --- Alert channels ---------------------------------------------------------

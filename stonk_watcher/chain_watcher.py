@@ -93,17 +93,136 @@ class ChainWatcher:
                         f"tx: {tx_link}", level="alert")
         self.state.save_if_dirty()
 
+    def check_internal_creations(self) -> None:
+        """Catch contracts deployed from inside a call, not as a top-level tx.
+
+        A factory created by another contract leaves no top-level creation
+        tx, so the /transactions feed alone would miss the LauncherFactory
+        deploy — the single most important event this watcher exists to
+        catch.
+        """
+        for wallet in config.TEAM_WALLETS:
+            wstate = self.state.wallet_state(wallet)
+            seen = wstate.setdefault("seen_internal", [])
+            try:
+                items = self.blockscout.internal_transactions(wallet)
+            except requests.RequestException as exc:
+                self._blockscout_failure(exc)
+                continue
+            self._blockscout_ok()
+
+            if not wstate.get("internal_baselined"):
+                wstate["seen_internal"] = [
+                    self._internal_key(i) for i in items][-500:]
+                wstate["internal_baselined"] = True
+                self.state.mark_dirty()
+                log.info("baselined %d internal txs for %s", len(items), wallet)
+                continue
+
+            for item in reversed(items):
+                key = self._internal_key(item)
+                if key in seen:
+                    continue
+                seen.append(key)
+                del seen[:-500]
+                self.state.mark_dirty()
+                created = item.get("created_contract") or {}
+                addr = created.get("hash") if isinstance(created, dict) else None
+                if not addr:
+                    continue
+                block = tx_block_number(item) or self._safe_head()
+                tx_link = config.BLOCKSCOUT_TX_URL.format(
+                    tx=item.get("transaction_hash") or item.get("hash") or "?")
+                self.on_contract_creation(wallet, addr, block, tx_link,
+                                          internal=True)
+        self.state.save_if_dirty()
+
+    @staticmethod
+    def _internal_key(item: Dict[str, Any]) -> str:
+        return (f"{item.get('transaction_hash') or item.get('hash')}"
+                f":{item.get('index', item.get('block_index', '?'))}")
+
     def on_contract_creation(self, wallet: str, contract: str, block: int,
-                             tx_link: str) -> None:
+                             tx_link: str, internal: bool = False) -> None:
         added = self.state.add_candidate_factory(contract, block,
                                                  source="team_wallet")
-        self.pipeline.send(
-            f"TEAM WALLET DEPLOYED A CONTRACT — possible Stonk Launcher factory\n"
-            f"{contract}\nwallet: {wallet}\ndeploy block: {block}\n"
-            f"contract: {config.BLOCKSCOUT_ADDRESS_URL.format(addr=contract)}\n"
-            f"tx: {tx_link}\n"
-            f"{'Now watching ALL logs it emits.' if added else '(already watching)'}",
-            level="loud", code_lines=[contract])
+        # Ask the contract what it is. An ABI exposing createLaunch /
+        # finalizeLaunch / launchToken identifies the LauncherFactory
+        # positively rather than by inference, so it earns a launch-grade
+        # alert instead of being filtered as routine recon.
+        ident = self.blockscout.identify_launcher(contract)
+        origin = "internal tx" if internal else "direct tx"
+        if ident.get("is_launcher"):
+            self.state.set_factory_field(contract, "confirmed_launcher", True)
+            self.state.save_if_dirty()
+            self.pipeline.send(
+                f"*** LAUNCHER FACTORY FOUND ***\n{contract}\n"
+                f"verified contract: {ident.get('name') or '?'}\n"
+                f"ABI exposes: {', '.join(ident['markers'])}\n"
+                f"deployed by {wallet} ({origin}) at block {block}\n"
+                f"contract: "
+                f"{config.BLOCKSCOUT_ADDRESS_URL.format(addr=contract)}\n"
+                f"tx: {tx_link}\n"
+                "Now watching every log it emits — launches through it will "
+                "alert from chain.",
+                level="loud", code_lines=[contract], category="launch")
+        else:
+            self.pipeline.send(
+                f"TEAM WALLET DEPLOYED A CONTRACT — possible Stonk Launcher "
+                f"factory\n{contract}\nwallet: {wallet} ({origin})\n"
+                f"deploy block: {block}\n"
+                f"verified: {ident.get('name') or 'not verified yet'}\n"
+                f"contract: "
+                f"{config.BLOCKSCOUT_ADDRESS_URL.format(addr=contract)}\n"
+                f"tx: {tx_link}\n"
+                f"{'Now watching ALL logs it emits.' if added else '(already watching)'}",
+                level="loud", code_lines=[contract])
+        self.state.save_if_dirty()
+
+    # -- Safety Deposit Box: LP locks ----------------------------------------
+    def scan_lp_locks(self, head: int) -> None:
+        """An LP lock means liquidity was just committed for a token — the
+        strongest launch signal this ecosystem emits."""
+        for locker, label in config.LP_LOCKERS.items():
+            cursor = self.state.data["lp_locks"].get(locker)
+            if not isinstance(cursor, int):
+                # Arm at head: historical locks are not launches happening now.
+                self.state.data["lp_locks"][locker] = head
+                self.state.mark_dirty()
+                continue
+            if cursor >= head:
+                continue
+            try:
+                logs = self.rpc.get_logs_chunked(
+                    locker, cursor + 1, head,
+                    topics=[sorted(config.LP_LOCK_TOPICS)])
+            except RpcError as exc:
+                log.warning("lp lock scan failed for %s: %s", locker, exc)
+                continue  # cursor holds; the window is retried
+            self.state.data["lp_locks"][locker] = head
+            self.state.mark_dirty()
+            for entry in logs:
+                tx_hash = entry.get("transactionHash", "?")
+                key = f"{tx_hash}:{entry.get('logIndex', '?')}"
+                if key in self.state.data["lp_lock_seen"]:
+                    continue
+                self.state.data["lp_lock_seen"].append(key)
+                del self.state.data["lp_lock_seen"][:-2000]
+                self.state.mark_dirty()
+                topics = entry.get("topics") or []
+                owner = None
+                for topic in reversed(topics[1:]):
+                    owner = topic_to_address(topic)
+                    if owner:
+                        break
+                self.pipeline.send(
+                    f"LP LOCKED — {label}\n"
+                    f"owner: {owner or 'unknown'}\n"
+                    f"tx: {config.BLOCKSCOUT_TX_URL.format(tx=tx_hash)}\n"
+                    "Liquidity was just locked in the Safety Deposit Box. "
+                    "This is the strongest launch signal on the ecosystem — "
+                    "open the tx to see which token.",
+                    level="loud", category="launch")
         self.state.save_if_dirty()
 
     # -- 2b: candidate factories ---------------------------------------------
@@ -297,6 +416,12 @@ class ChainWatcher:
         """Arm any contract listed in WATCH_CONTRACTS, so a factory address
         learned by other means is covered without waiting to see it deployed.
         """
+        for addr, label in config.KNOWN_STONK_FACTORIES.items():
+            if addr in self.state.candidate_factories():
+                continue
+            start = max(0, head - config.WATCH_CONTRACTS_LOOKBACK)
+            self.state.add_candidate_factory(addr, start, source="known_stonk")
+            log.info("armed known StonkBrokers factory %s (%s)", addr, label)
         for addr in config.WATCH_CONTRACTS:
             if addr.lower() in self.state.candidate_factories():
                 continue
@@ -428,9 +553,11 @@ class ChainWatcher:
             head = None
 
         self.check_dev_wallets()
+        self.check_internal_creations()
         if head is not None:
             self.seed_watched_contracts(head)
             self.learn_factories_from_tracked(head)
+            self.scan_lp_locks(head)
             self.scan_candidate_factories(head)
             self.scan_amm_factory(head)
 
