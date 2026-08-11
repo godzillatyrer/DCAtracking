@@ -261,3 +261,63 @@ def test_env_can_add_symbols(monkeypatch):
     finally:
         monkeypatch.delenv("EXPECTED_SUPPLIES", raising=False)
         importlib.reload(config)
+
+
+# -- LP lock alerts must carry the CA, not just a link -----------------------
+
+def _lock_setup(state, pipeline, errors, transfers):
+    lock_log = factory_log("0xlockca", [config.TOPIC_POSITION_LOCKED_V3,
+                                        "0x" + "00" * 32,
+                                        "0x" + "00" * 31 + "07",
+                                        "0x" + "0" * 24 + "ab" * 20])
+    rpc = FakeRpc(logs_by_address={LOCKER_V3: [lock_log]})
+    bs = FakeBlockscout(tx_transfers={"0xlockca": transfers})
+    watcher = make_watcher(state, pipeline, errors, bs, rpc=rpc)
+    watcher.scan_lp_locks(head=1000)
+    watcher.scan_lp_locks(head=1100)
+    return watcher
+
+
+def _transfer(addr, name, symbol):
+    return {"token": {"address": addr, "name": name, "symbol": symbol}}
+
+
+def test_lp_lock_alert_includes_the_contract_address(state, pipeline, errors):
+    """The PositionLocked event carries only position IDs and an owner, so
+    the token is resolved from the transaction's transfers — otherwise the
+    alert is just a link you have to go dig through."""
+    _lock_setup(state, pipeline, errors,
+                [_transfer(TOKEN, "ClockIn", "CLOCKIN")])
+    alert = pipeline.find("LP LOCKED")
+    assert alert
+    text = alert[0]["text"]
+    assert text.splitlines()[0] == TOKEN, "bare CA first, for copy-paste"
+    assert "ClockIn (CLOCKIN)" in text
+    assert TOKEN in (alert[0]["code_lines"] or []), "tap-to-copy on Telegram"
+
+
+def test_quote_assets_are_not_reported_as_the_token(state, pipeline, errors):
+    """An LP lock moves WETH/USDG too; naming those as the launch would be
+    worse than useless."""
+    weth = "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+    _lock_setup(state, pipeline, errors,
+                [_transfer(weth, "Wrapped Ether", "WETH"),
+                 _transfer(TOKEN, "ClockIn", "CLOCKIN")])
+    text = pipeline.find("LP LOCKED")[0]["text"]
+    assert text.splitlines()[0] == TOKEN
+    assert "WETH" not in text
+
+
+def test_clockin_lock_is_escalated(state, pipeline, errors):
+    _lock_setup(state, pipeline, errors,
+                [_transfer(TOKEN, "ClockIn", "CLOCKIN")])
+    assert pipeline.find("*** CLOCKIN *** LP LOCKED")
+
+
+def test_lock_still_alerts_when_token_cannot_be_resolved(state, pipeline, errors):
+    """Blockscout may be down or the tx may move only quote assets. The lock
+    itself is still the signal, so it must not be swallowed."""
+    _lock_setup(state, pipeline, errors, [])
+    alert = pipeline.find("LP LOCKED")
+    assert alert and "could not be resolved" in alert[0]["text"]
+    assert alert[0]["category"] == "launch"
