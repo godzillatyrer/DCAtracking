@@ -114,31 +114,42 @@ Add more with `EXPECTED_SUPPLIES=CLOCKIN:1000000000,FOO:99` (env entries win
 over built-ins). A symbol with no expected supply is never reported as
 confirmed — silence about a fact we don't have beats a false CONFIRMED.
 
-### up. DEX (`up33.xyz`) — supported, but not built in
+### LP seeding on up. (`up33.xyz`) — and any other venue
 
-Launcher graduates are expected to get liquidity and a gauge on up. after
-bonding, which makes gauge/pool creation there a **graduation** signal.
+Launchpad tokens are seeded for liquidity on up. after bonding, so an
+`LP SEEDED` alert fires when that happens.
 
-Two reasons there is no dedicated module:
+up.'s factory address is unpublished, so this does **not** watch up.
+Instead it watches from the **token's** side: `Transfer` events emitted by
+tokens already confirmed as launchpad tokens, flagging the first transfer
+into a contract. That contract is the pool.
 
-1. **It is a late signal, not an early one.** Bonding completes well after
-   the token exists, so up. would tell you a token *graduated*, not that it
-   just launched — and the CA is what matters at T0.
-2. **The addresses are not published.** up. runs Slipstream, which is not
-   ABI-compatible with Uniswap V3 (pools are keyed by `int24 tickSpacing`,
-   never `uint24 fee`, and swap fees are governance-tunable, so they must be
-   read live rather than from a static tier table). Guessing a factory
-   address would be worse than having none.
+Two things fall out of that inversion:
 
-**No code is needed to enable it.** `WATCH_CONTRACTS` scans any contract
-topic-agnostically, so once you have the up. factory or voter address:
+- **It is venue-agnostic.** up., Uniswap V3, or anywhere else — no address
+  needed in advance, and nothing to guess.
+- **It cannot reintroduce noise.** The `eth_getLogs` address filter *is* the
+  confirmed-token list, so an unrelated memecoin getting liquidity is never
+  even queried, let alone alerted.
+
+Transfers to wallets, lockers and position managers are skipped, and each
+pool alerts once — later transfers are trading, not seeding.
+
+The alert names the venue by resolving who deployed the pool. Since up.'s
+factory is unknown, an unrecognised deployer is **reported rather than
+hidden**, so the first real graduation is how you learn the address:
 
 ```
-WATCH_CONTRACTS=0xUpFactoryAddress
+LP SEEDED — CLOCKIN
+0x…                      ← the token
+pool: 0x…
+venue: venue 0x1122…     ← up.'s factory, revealed
+Unrecognised pool deployer — if this is up., set UP_DEX_CONTRACTS=0x1122… to label it in future.
 ```
 
-It is armed on the next cycle, and any token it emits is confirmed through
-the same creation check as every other factory.
+Set `UP_DEX_CONTRACTS=0x…` after that and subsequent alerts read
+`venue: up. (up33.xyz)` with a link straight to the trade page. Disable the
+whole thing with `LIQUIDITY_WATCH=0`.
 
 ### pools.fun is a separate ecosystem
 
