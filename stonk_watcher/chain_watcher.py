@@ -528,42 +528,67 @@ class ChainWatcher:
         self.state.data["liquidity_last_scanned"] = head
         self.state.mark_dirty()
 
-        checks = 0
+        # Group candidate recipients per token and rank by transfer size.
+        # Once a token trades, every contract counterparty — routers,
+        # aggregators, smart wallets — receives tokens and would otherwise
+        # each look like a fresh pool. Seeding moves far more than a trade,
+        # so the largest transfer is the best single candidate.
+        candidates: Dict[str, List[Dict[str, Any]]] = {}
         for entry in logs:
             token = (entry.get("address") or "").lower()
             if not self.state.is_tracked(token):
                 continue
+            if token in self.state.data["lp_alerted"]:
+                continue  # one LP alert per token, ever
             topics = entry.get("topics") or []
             if len(topics) < 3:
                 continue
             recipient = topic_to_address(topics[2])
-            if not recipient:
-                continue
-            if (recipient in config.BORING_ADDRESSES
+            if (not recipient or recipient == token
+                    or recipient in config.BORING_ADDRESSES
                     or recipient in config.NON_POOL_RECIPIENTS
+                    or self.state.is_tracked(recipient)
                     or recipient in self.state.candidate_factories()):
                 continue
-            pools = self.state.data["token_pools"].setdefault(token, [])
-            if recipient in pools:
-                continue
-            if checks >= config.MAX_POOL_CHECKS_PER_CYCLE:
-                log.info("pool-check cap reached; remaining next cycle")
-                break
-            checks += 1
-            self._check_pool_recipient(token, recipient, entry, pools)
+            try:
+                value = int(str(entry.get("data") or "0x0"), 16)
+            except ValueError:
+                value = 0
+            candidates.setdefault(token, []).append(
+                {"recipient": recipient, "entry": entry, "value": value})
+
+        checks = 0
+        for token, items in candidates.items():
+            items.sort(key=lambda i: i["value"], reverse=True)
+            seen_recipients = set()
+            for item in items:
+                if item["recipient"] in seen_recipients:
+                    continue
+                seen_recipients.add(item["recipient"])
+                if checks >= config.MAX_POOL_CHECKS_PER_CYCLE:
+                    log.info("pool-check cap reached; remaining next cycle")
+                    break
+                checks += 1
+                pools = self.state.data["token_pools"].setdefault(token, [])
+                if self._check_pool_recipient(token, item["recipient"],
+                                              item["entry"], pools):
+                    break  # alerted for this token; stop looking
         self.state.save_if_dirty()
 
     def _check_pool_recipient(self, token: str, recipient: str,
-                              entry: Dict[str, Any], pools: List[str]) -> None:
+                              entry: Dict[str, Any],
+                              pools: List[str]) -> bool:
+        """Returns True if this recipient was confirmed a pool and alerted."""
         try:
             info = self.blockscout.classify_address(recipient)
         except requests.RequestException as exc:
             self._blockscout_failure(exc)
-            return  # unrecorded, so the next cycle retries
+            return False  # unrecorded, so the next cycle retries
         self._blockscout_ok()
         if not info.get("is_contract"):
-            return  # an EOA receiving tokens is a transfer, not a pool
+            return False  # an EOA receiving tokens is a transfer, not a pool
         pools.append(recipient)
+        self.state.data["lp_alerted"].append(token)
         self.state.mark_dirty()
 
         # Name the venue by who deployed the pool. up.'s factory is unknown,
@@ -595,6 +620,7 @@ class ChainWatcher:
             f"tx: {config.BLOCKSCOUT_TX_URL.format(tx=entry.get('transactionHash', '?'))}"
             f"{hint}",
             level="loud", code_lines=[token], category="launch")
+        return True
 
     # -- learn the real factory from a confirmed launchpad token -------------
     def learn_factories_from_tracked(self, head: int) -> None:
