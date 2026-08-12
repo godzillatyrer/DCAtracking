@@ -5,6 +5,7 @@ Usage:
   python3 watcher.py               run the watcher (24/7)
   python3 watcher.py --test-alert  send a test alert on every channel
   python3 watcher.py --status      print state summary and poll cadence
+  python3 watcher.py --check-ca 0x…  is this CA a launchpad launch?
   python3 watcher.py --once        run one cycle of each component and exit
   python3 watcher.py --port 10000  also serve a JSON health endpoint
 
@@ -48,6 +49,96 @@ def cmd_test_alert(pipeline: AlertPipeline) -> int:
     return 0
 
 
+def cmd_check_ca(state: State, ca: str) -> int:
+    """Answer 'is this CA a Stonk Launcher launch?' from on-chain provenance.
+
+    Uses the same provenance rule the watcher enforces: what matters is who
+    deployed the token, never what it is called or what its address looks
+    like.
+    """
+    from stonk_watcher.alerts import is_target_token, verdict_for_target
+    from stonk_watcher.blockscout import BlockscoutClient
+
+    ca = ca.strip().lower()
+    if not (ca.startswith("0x") and len(ca) == 42):
+        print(f"Not an address: {ca}")
+        return 2
+
+    bs = BlockscoutClient()
+    print(f"checking {ca}\n")
+    try:
+        info = bs.classify_address(ca)
+    except Exception as exc:  # network/parse — report, do not pretend
+        print(f"FAILED to reach Blockscout: {exc}")
+        return 3
+    if not info.get("exists"):
+        print("VERDICT: NOT A CONTRACT ON THIS CHAIN — nothing deployed here.")
+        return 1
+
+    token = info.get("token") or {}
+    name = str(token.get("name") or "?")
+    symbol = str(token.get("symbol") or "?")
+    supply = str(token.get("total_supply") or token.get("totalSupply") or "?")
+    print(f"  token:    {name} ({symbol})")
+    print(f"  supply:   {supply}")
+    print(f"  contract: {info.get('is_contract')}")
+
+    try:
+        creation = bs.creation_info(ca)
+    except Exception as exc:
+        print(f"\nFAILED to read creator: {exc}")
+        return 3
+    creator = (creation.get("creator") or "").lower()
+    if not creator:
+        print("\nVERDICT: UNKNOWN — creator not indexed yet. Re-run shortly.")
+        return 1
+    print(f"  creator:  {creator}")
+
+    reasons = []
+    known = config.KNOWN_STONK_FACTORIES.get(creator)
+    if known:
+        reasons.append(f"creator is the known StonkBrokers {known}")
+    armed = state.candidate_factories().get(creator)
+    if armed:
+        reasons.append(f"creator is an armed factory (source: {armed.get('source')})")
+        if armed.get("confirmed_launcher"):
+            reasons.append("creator is a CONFIRMED LauncherFactory by ABI")
+    ident = bs.identify_launcher(creator)
+    if ident.get("is_launcher"):
+        reasons.append(f"creator ABI exposes {', '.join(ident['markers'])}")
+    if ident.get("name"):
+        print(f"  creator verified as: {ident['name']}")
+
+    creator_info = bs.classify_address(creator)
+    if not creator_info.get("is_contract"):
+        print("\nVERDICT: NOT A LAUNCHPAD TOKEN.")
+        print("  The creator is a plain wallet, so this was hand-deployed.")
+        print("  A launchpad token is deployed BY the launchpad contract.")
+        return 1
+
+    print()
+    if reasons:
+        print("VERDICT: LAUNCHPAD TOKEN — deployed by the launchpad.")
+        for reason in reasons:
+            print(f"  - {reason}")
+    else:
+        print("VERDICT: UNCONFIRMED — deployed by a contract we cannot tie to")
+        print("  the Stonk Launcher. It may be another launchpad or factory.")
+        print(f"  Compare {creator} against the factory in your")
+        print("  *** LAUNCHER FACTORY FOUND *** alert, if you have one.")
+
+    if is_target_token(name, symbol):
+        state_word, note = verdict_for_target(supply, symbol, name)
+        print(f"\n  name matches {config.TARGET_TOKEN_NAME}: {state_word.upper()}")
+        print(f"  {note}")
+        print("  Duplicate tickers exist on this chain — the creator above is")
+        print("  what decides, not the name.")
+    if ca.endswith("666666"):
+        print("\n  note: the ...666666 vanity suffix is the launcher's pattern,")
+        print("  but anyone can mine it. It is not evidence either way.")
+    return 0 if reasons else 1
+
+
 def cmd_status(state: State) -> int:
     now = datetime.now(timezone.utc)
     t0 = config.get_t0()
@@ -77,6 +168,8 @@ def main() -> int:
                         help="print state summary and exit")
     parser.add_argument("--once", action="store_true",
                         help="run one cycle of each component and exit")
+    parser.add_argument("--check-ca", metavar="ADDRESS", default=None,
+                        help="is this contract a Stonk Launcher launch?")
     parser.add_argument("--port", type=int, default=None,
                         help="serve a JSON health endpoint on this port "
                              "(defaults to $PORT when set)")
@@ -92,6 +185,8 @@ def main() -> int:
         return cmd_test_alert(pipeline)
 
     state = State()
+    if args.check_ca:
+        return cmd_check_ca(state, args.check_ca)
     if args.status:
         return cmd_status(state)
 
