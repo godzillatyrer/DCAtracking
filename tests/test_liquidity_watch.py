@@ -201,3 +201,75 @@ def test_liquidity_watch_can_be_disabled(state, pipeline, errors, monkeypatch):
     watcher.scan_tracked_liquidity(head=1000)
     watcher.scan_tracked_liquidity(head=1100)
     assert not pipeline.sent
+
+
+def test_one_lp_alert_per_token_across_many_pools(state, pipeline, errors):
+    """Reproduction of the production flood: STONKS fired four times in two
+    minutes because each contract counterparty had a different address. Once
+    a token trades, routers and aggregators all receive it — only the first
+    is news."""
+    state.add_tracked(TOKEN, source="api", name="stonks", symbol="STONKS")
+    pools = ["0x44c5a509d0f857b5b5919e8f4126f8b0f6824410",
+             "0xd970de3e85a178aa21d52cc4548434e2da1489f2",
+             "0xf3b8f14e665941be1ae551d0daa94b1a86623272"]
+    bs = PoolBlockscout(contracts=pools,
+                        creators={p: {"creator": UP_FACTORY, "block": 10}
+                                  for p in pools})
+    watcher = make_watcher(state, pipeline, errors,
+                           [transfer_log(TOKEN, pools[0], tx="0xa")], bs)
+    watcher.scan_tracked_liquidity(head=1000)
+    watcher.scan_tracked_liquidity(head=1100)
+    assert len(pipeline.find("LP SEEDED")) == 1
+
+    # Later cycles find different contract recipients — still silent.
+    for i, pool in enumerate(pools[1:], start=2):
+        state.data["liquidity_last_scanned"] = 1000 + i * 100
+        make_watcher(state, pipeline, errors,
+                     [transfer_log(TOKEN, pool, tx=f"0x{i}")], bs
+                     ).scan_tracked_liquidity(head=1100 + i * 100)
+    assert len(pipeline.find("LP SEEDED")) == 1, "exactly one alert per token"
+    assert TOKEN in state.data["lp_alerted"]
+
+
+def test_largest_transfer_wins_within_a_cycle(state, pipeline, errors):
+    """Seeding moves far more than a trade, so when several contracts appear
+    in one window the biggest transfer is the likeliest real pool."""
+    state.add_tracked(TOKEN, source="api", name="stonks", symbol="STONKS")
+    router = "0x1111000000000000000000000000000000009999"
+    bs = PoolBlockscout(contracts=[router, POOL],
+                        creators={POOL: {"creator": UP_FACTORY, "block": 10}})
+
+    def sized(to, value):
+        entry = transfer_log(TOKEN, to, tx=f"0x{to[-4:]}")
+        entry["data"] = hex(value)
+        return entry
+
+    watcher = make_watcher(state, pipeline, errors,
+                           [sized(router, 1000), sized(POOL, 999_000_000)], bs)
+    watcher.scan_tracked_liquidity(head=1000)
+    watcher.scan_tracked_liquidity(head=1100)
+    alerts = pipeline.find("LP SEEDED")
+    assert len(alerts) == 1
+    assert POOL in alerts[0]["text"], "the big transfer is the pool"
+    assert router not in alerts[0]["text"]
+
+
+def test_alert_once_survives_restart(tmp_path, pipeline, errors):
+    from stonk_watcher.state import State
+    path = str(tmp_path / "state.json")
+    state1 = State(path=path)
+    state1.add_tracked(TOKEN, source="api", name="stonks", symbol="STONKS")
+    bs = PoolBlockscout(contracts=[POOL],
+                        creators={POOL: {"creator": UP_FACTORY, "block": 10}})
+    w = make_watcher(state1, pipeline, errors, [transfer_log(TOKEN, POOL)], bs)
+    w.scan_tracked_liquidity(head=1000)
+    w.scan_tracked_liquidity(head=1100)
+    assert len(pipeline.find("LP SEEDED")) == 1
+
+    state2 = State(path=path)
+    assert TOKEN in state2.data["lp_alerted"]
+    state2.data["liquidity_last_scanned"] = 1100
+    make_watcher(state2, pipeline, errors,
+                 [transfer_log(TOKEN, POOL, tx="0xb")], bs
+                 ).scan_tracked_liquidity(head=1200)
+    assert len(pipeline.find("LP SEEDED")) == 1, "no repeat after restart"

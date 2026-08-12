@@ -31,6 +31,7 @@ def _default_state() -> Dict[str, Any]:
         "lp_lock_seen": [],               # dedupe for lock events
         "liquidity_last_scanned": None,   # cursor for tracked-token LP watch
         "token_pools": {},                # token -> [pool addresses seen]
+        "lp_alerted": [],                 # tokens whose LP alert already fired
         # Track 3
         "frontend": {
             "deployment_id": None,
