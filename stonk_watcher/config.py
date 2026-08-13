@@ -169,7 +169,34 @@ TEAM_WALLETS = [
 # CLOCKIN variants), so it is a real launch source, not a guess.
 KNOWN_STONK_FACTORIES = {
     "0x662003bf6049e36b4e887d47b8df8718ffbbc6c2": "CollectionTokenDeployer",
+    # The Stonk Launcher is a PAIR of contracts, confirmed on-chain from the
+    # STONKS / STONKCAT / BROKE deploys. Both are armed because they play
+    # different roles and only one of them emits the launch events.
+    "0x80a77001456bc986083678f9a112b1ec2aa07281": "StonkLauncher factory (entrypoint)",
+    "0x00f8c29b28cb00a20f0ca071efaed0d3fe15dd97": "StonkLaunchDeployer (CREATE2)",
 }
+
+# Contracts that together constitute the launchpad. A token deployed by ANY
+# of these is a launchpad token: the entrypoint receives launchToken() and
+# delegates the actual CREATE2 to the deployer, which was split out to keep
+# the factory under the EIP-170 24KB limit. So Blockscout records the
+# DEPLOYER as a token's creator while the ENTRYPOINT is what emits events —
+# and requiring creator == the emitting factory would reject every genuine
+# launch.
+STONK_LAUNCHPAD_CONTRACTS = {
+    "0x80a77001456bc986083678f9a112b1ec2aa07281",
+    "0x00f8c29b28cb00a20f0ca071efaed0d3fe15dd97",
+}
+for _extra in env("EXTRA_LAUNCHPAD_CONTRACTS").split(","):
+    _addr = _extra.strip().lower()
+    if _addr.startswith("0x") and len(_addr) == 42:
+        STONK_LAUNCHPAD_CONTRACTS.add(_addr)
+        KNOWN_STONK_FACTORIES.setdefault(_addr, "configured launchpad contract")
+
+# Every launcher token so far carries exactly this supply (1e9 with 18
+# decimals), which is the factory's defaultTotalSupply(). Corroborating, not
+# decisive — a launch can override it.
+LAUNCHER_DEFAULT_SUPPLY = "1000000000000000000000000000"
 
 # Safety Deposit Box lockers. An LP lock is the strongest launch signal on
 # this ecosystem: it means liquidity was just committed for a token.

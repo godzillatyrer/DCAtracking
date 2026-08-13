@@ -10,13 +10,15 @@ own. Provenance decides; the name only escalates.
 """
 from stonk_watcher import config
 from stonk_watcher.chain_watcher import ChainWatcher
-from tests.test_chain_watcher import FakeBlockscout, FakeRpc, factory_log
+from tests.test_chain_watcher import (FakeBlockscout, FakeRpc, factory_log,
+                                      pad_address)
 
 WALLET = config.TEAM_WALLETS[0]  # MASTER EOA, deployed the token factory
 LAUNCHER = "0x1acecafe00000000000000000000000000000001"
 PLAIN = "0x0badc0de00000000000000000000000000000002"
 TOKEN = "0xc10c1c10c1c10c1c10c1c10c1c10c1c10c1c10c1"
 LOCKER_V3 = "0xfc96cf67ecc55be4adabc3aecbe6ad6349f11223"
+TOPIC_LAUNCH = "0x" + "cd" * 32
 
 
 def internal_creation(tx_hash, contract, index=0, block=900):
@@ -358,3 +360,56 @@ def test_factory_is_the_called_contract_not_the_caller(monkeypatch, tmp_path):
     assert res["deployer"] == sniper, "the caller is reported separately"
     assert res["factory_is_contract"] is True
     assert any("launchToken" in r for r in res["reasons"])
+
+
+# -- the launchpad is two contracts, not one --------------------------------
+
+ENTRYPOINT = "0x80a77001456bc986083678f9a112b1ec2aa07281"
+DEPLOYER = "0x00f8c29b28cb00a20f0ca071efaed0d3fe15dd97"
+
+
+def test_both_launchpad_contracts_are_armed():
+    """Confirmed on-chain from STONKS/STONKCAT/BROKE: the entrypoint receives
+    launchToken() and delegates CREATE2 to a separate deployer, split out to
+    stay under the EIP-170 24KB limit."""
+    assert ENTRYPOINT in config.KNOWN_STONK_FACTORIES
+    assert DEPLOYER in config.KNOWN_STONK_FACTORIES
+    assert config.STONK_LAUNCHPAD_CONTRACTS == {ENTRYPOINT, DEPLOYER}
+
+
+def test_token_created_by_the_deployer_is_accepted_from_the_entrypoint(
+        state, pipeline, errors):
+    """The bug this guards: the entrypoint emits the launch event, but
+    Blockscout records the DEPLOYER as the token's creator. Requiring
+    creator == the emitting factory rejected every genuine launch."""
+    state.add_candidate_factory(ENTRYPOINT, 900, source="known_stonk")
+    rpc = FakeRpc(logs_by_address={ENTRYPOINT: [
+        factory_log("0xlaunch1", [TOPIC_LAUNCH, pad_address(TOKEN)])]})
+    bs = FakeBlockscout(
+        tokens={TOKEN: {"name": "stonks", "symbol": "STONKS",
+                        "total_supply": config.LAUNCHER_DEFAULT_SUPPLY}},
+        # creator is the DEPLOYER, not the entrypoint whose logs we read
+        creators={TOKEN: {"creator": DEPLOYER, "block": 900,
+                          "called_contract": ENTRYPOINT}})
+    make_watcher(state, pipeline, errors, bs, rpc=rpc).run_once()
+
+    discovery = pipeline.find("NEW TOKEN VIA NEW FACTORY")
+    assert discovery, "a token created by the paired deployer IS a launch"
+    assert discovery[0]["category"] == "launch"
+    assert state.is_tracked(TOKEN)
+
+
+def test_unrelated_creator_is_still_rejected(state, pipeline, errors):
+    """The relaxation must not become a hole: a token created by something
+    outside the launchpad is still not a launch."""
+    stranger = "0xdead000000000000000000000000000000000001"
+    state.add_candidate_factory(ENTRYPOINT, 900, source="known_stonk")
+    rpc = FakeRpc(logs_by_address={ENTRYPOINT: [
+        factory_log("0xlaunch2", [TOPIC_LAUNCH, pad_address(TOKEN)])]})
+    bs = FakeBlockscout(
+        tokens={TOKEN: {"name": "Random", "symbol": "RND"}},
+        creators={TOKEN: {"creator": stranger, "block": 900,
+                          "called_contract": stranger}})
+    make_watcher(state, pipeline, errors, bs, rpc=rpc).run_once()
+    assert not pipeline.find("NEW TOKEN VIA NEW FACTORY")
+    assert not state.is_tracked(TOKEN)
