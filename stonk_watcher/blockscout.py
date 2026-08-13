@@ -110,16 +110,31 @@ class BlockscoutClient:
         if isinstance(creator, dict):
             creator = creator.get("hash")
         block = None
+        called = None
         tx_hash = info.get("creation_tx_hash") or info.get("creation_transaction_hash")
         if tx_hash:
             try:
                 tx = self._get(f"transactions/{tx_hash}")
                 if tx:
                     block = tx_block_number(tx)
+                    # The contract this creation transaction was sent TO. When
+                    # a user calls launchToken() the factory deploys the token,
+                    # so "creator" can be the caller's wallet while the factory
+                    # is this `to` address. Mistaking one for the other would
+                    # label a real launchpad token as hand-deployed.
+                    to = tx.get("to")
+                    if isinstance(to, dict):
+                        called = (to.get("hash") or "").lower() or None
+                        if to.get("is_contract") is False:
+                            called = None
+                    elif isinstance(to, str):
+                        called = to.lower()
             except requests.RequestException:
                 block = None
         return {"creator": creator.lower() if isinstance(creator, str) else None,
-                "block": block}
+                "block": block,
+                "called_contract": called,
+                "creation_tx": tx_hash}
 
     def classify_address(self, address: str) -> Dict[str, Any]:
         """Best-effort classification used by the address-extraction heuristic.
