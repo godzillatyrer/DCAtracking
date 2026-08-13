@@ -335,7 +335,18 @@ class ChainWatcher:
                                 count_attempt=False)
             return
         creator = (creation.get("creator") or "").lower()
-        if creator and creator != factory.lower():
+        # The launchpad is a SYSTEM of contracts: the entrypoint receives the
+        # launch call and delegates CREATE2 to a separate deployer, so the
+        # recorded creator is usually NOT the contract whose logs we are
+        # reading. Requiring creator == this factory would reject every real
+        # launch. Accept any contract in the launchpad, plus the call target.
+        accepted = (
+            {factory.lower()}
+            | config.STONK_LAUNCHPAD_CONTRACTS
+            | set(self.state.candidate_factories())
+        )
+        called = (creation.get("called_contract") or "").lower()
+        if creator and creator not in accepted and called not in accepted:
             log.info("skipping %s: referenced by %s but created by %s",
                      candidate, factory, creator)
             return

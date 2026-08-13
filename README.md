@@ -85,9 +85,28 @@ three ways:
    declaration, and fires `*** LAUNCHER FACTORY FOUND ***`.
 3. **The site bundle** (above), which usually publishes it first.
 
-`CollectionTokenDeployer` (`0x662003BF…`) is armed at startup: it has already
+### The launchpad is two contracts
+
+Confirmed on-chain from the STONKS / STONKCAT / BROKE deploys:
+
+| Address | Role |
+|---|---|
+| `0x80a77001456bc986083678F9a112B1EC2Aa07281` | **StonkLauncher factory** — the entrypoint a launcher calls; emits the launch events |
+| `0x00f8C29B28CB00a20F0CA071eFAED0D3fE15Dd97` | **StonkLaunchDeployer** — issues the CREATE2; `deployToken` reverts unless `msg.sender == factory` |
+
+They were split so the factory stays under the EIP-170 24KB bytecode limit.
+This matters for detection: **Blockscout records the deployer as a token's
+creator, while the entrypoint is what emits the events.** Requiring
+`creator == the factory whose logs we read` would therefore reject every
+genuine launch, so a token created by *any* contract in the launchpad is
+accepted. Both are armed at startup.
+
+`CollectionTokenDeployer` (`0x662003BF…`) is armed too: it has already
 created 40 tokens including several CLOCKIN variants, so it is a confirmed
 launch source rather than a guess.
+
+Add more with `EXTRA_LAUNCHPAD_CONTRACTS=0x…` if the team redeploys before
+the watcher observes it.
 
 **LP locks** in the Safety Deposit Box (V3 `0xfc96cf67…`, V4 `0x5a28ce09…`)
 are watched with keccak-verified topics. A lock means liquidity was just
