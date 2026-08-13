@@ -68,14 +68,40 @@ def _describe_ca(bs, state: State, ca: str) -> dict:
     out["supply"] = str(token.get("total_supply")
                         or token.get("totalSupply") or "?")
     try:
-        creator = (bs.creation_info(ca).get("creator") or "").lower()
+        creation = bs.creation_info(ca)
     except Exception as exc:
         out["error"] = f"creator lookup failed: {exc}"
         return out
-    if not creator:
-        out["error"] = "creator not indexed yet — re-run shortly"
+    creator = (creation.get("creator") or "").lower()
+    called = (creation.get("called_contract") or "").lower()
+    out["deployer"] = creator or None
+    out["called_contract"] = called or None
+    if not creator and not called:
+        out["error"] = "creation not indexed yet — re-run shortly"
         return out
-    out["creator"] = creator
+
+    # The factory is whichever of the two is a contract. When a user calls
+    # launchToken(), the token's recorded creator can be that caller's
+    # WALLET while the factory is the contract the tx was sent to. Taking
+    # "creator" at face value would label a real launchpad token as
+    # hand-deployed, so the tx target wins when the creator is an EOA.
+    creator_is_contract = None
+    if creator:
+        try:
+            creator_is_contract = bs.classify_address(creator).get("is_contract")
+        except Exception:
+            creator_is_contract = None
+    out["creator_is_contract"] = creator_is_contract
+    if creator and creator_is_contract:
+        out["creator"] = creator
+        out["factory_from"] = "deployer of the token"
+    elif called:
+        out["creator"] = called
+        out["factory_from"] = f"contract called by {creator or 'the creator'}"
+    else:
+        out["creator"] = creator
+        out["factory_from"] = "deployer of the token"
+    creator = out["creator"]
 
     known = config.KNOWN_STONK_FACTORIES.get(creator)
     if known:
@@ -92,9 +118,9 @@ def _describe_ca(bs, state: State, ca: str) -> dict:
             out["reasons"].append(
                 f"creator ABI exposes {', '.join(ident['markers'])}")
         out["creator_name"] = ident.get("name")
-        out["creator_is_contract"] = bs.classify_address(creator).get("is_contract")
+        out["factory_is_contract"] = bs.classify_address(creator).get("is_contract")
     except Exception:
-        out["creator_is_contract"] = None
+        out["factory_is_contract"] = None
     return out
 
 
@@ -127,11 +153,13 @@ def cmd_check_ca(state: State, addresses) -> int:
             continue
         print(f"    token:   {res['name']} ({res['symbol']})")
         print(f"    supply:  {res['supply']}")
-        print(f"    creator: {res['creator']}")
+        if res.get("deployer") and res["deployer"] != res["creator"]:
+            print(f"    tx sender:  {res['deployer']}  (the caller, not the factory)")
+        print(f"    FACTORY:    {res['creator']}   [{res.get('factory_from')}]")
         if res.get("creator_name"):
-            print(f"    creator verified as: {res['creator_name']}")
-        if res.get("creator_is_contract") is False:
-            print("    creator is a WALLET — hand-deployed, not a launchpad token")
+            print(f"    verified as: {res['creator_name']}")
+        if res.get("factory_is_contract") is False:
+            print("    that address is a WALLET — hand-deployed, no factory")
         for reason in res["reasons"]:
             print(f"    - {reason}")
         if is_target_token(res["name"], res["symbol"]):
@@ -149,9 +177,9 @@ def cmd_check_ca(state: State, addresses) -> int:
         return 3
     if len(creators) == 1 and len(resolved) > 1:
         factory = creators.pop()
-        contract = all(r.get("creator_is_contract") is not False
+        contract = all(r.get("factory_is_contract") is not False
                        for r in resolved)
-        print(f"COMMON CREATOR across {len(resolved)} tokens:\n\n  {factory}\n")
+        print(f"COMMON FACTORY across {len(resolved)} tokens:\n\n  {factory}\n")
         if not contract:
             print("But that creator is a WALLET, not a contract — these were")
             print("deployed by hand from one address, not by a factory.")

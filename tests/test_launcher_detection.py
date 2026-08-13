@@ -321,3 +321,40 @@ def test_lock_still_alerts_when_token_cannot_be_resolved(state, pipeline, errors
     alert = pipeline.find("LP LOCKED")
     assert alert and "could not be resolved" in alert[0]["text"]
     assert alert[0]["category"] == "launch"
+
+
+# -- factory vs caller -------------------------------------------------------
+
+def test_factory_is_the_called_contract_not_the_caller(monkeypatch, tmp_path):
+    """When a user calls launchToken(), Blockscout can record THEIR wallet as
+    the token's creator while the factory is the contract the tx was sent to.
+    Taking creator at face value would call a real launchpad token
+    hand-deployed."""
+    import watcher as w
+    from stonk_watcher.state import State
+
+    sniper = "0x5111100000000000000000000000000000000001"   # an EOA caller
+    factory = "0xfac70fac70fac70fac70fac70fac70fac70fac70"  # the real factory
+
+    class BS:
+        def classify_address(self, addr):
+            return {"exists": True, "token": {"name": "stonks", "symbol": "STONKS",
+                                              "total_supply": "1000"},
+                    "is_contract": addr.lower() != sniper}
+
+        def creation_info(self, addr):
+            return {"creator": sniper, "block": 1,
+                    "called_contract": factory, "creation_tx": "0xabc"}
+
+        def identify_launcher(self, addr):
+            return {"is_launcher": addr.lower() == factory,
+                    "name": "LauncherFactory" if addr.lower() == factory else None,
+                    "markers": ["launchToken"] if addr.lower() == factory else [],
+                    "known": True}
+
+    state = State(path=str(tmp_path / "s.json"))
+    res = w._describe_ca(BS(), state, TOKEN)
+    assert res["creator"] == factory, "the called contract is the factory"
+    assert res["deployer"] == sniper, "the caller is reported separately"
+    assert res["factory_is_contract"] is True
+    assert any("launchToken" in r for r in res["reasons"])
