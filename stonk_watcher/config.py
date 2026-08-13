@@ -198,6 +198,22 @@ for _extra in env("EXTRA_LAUNCHPAD_CONTRACTS").split(","):
 # decisive — a launch can override it.
 LAUNCHER_DEFAULT_SUPPLY = "1000000000000000000000000000"
 
+# --- Vanity-suffix mint watch -----------------------------------------------
+# Launcher tokens are CREATE2-mined to end in this suffix (confirmed on
+# STONKS / STONKCAT / BROKE). A random address ends this way about once in
+# 16.7 million, so the suffix is a sharp filter rather than a heuristic -
+# which is what makes a chain-wide scan viable here where the old
+# alert-on-every-mint version was pure noise.
+VANITY_WATCH = env_bool("VANITY_WATCH", True)
+VANITY_SUFFIX = env("VANITY_SUFFIX", "666666").lower()
+# Its own fast cadence: one topic-filtered eth_getLogs per cycle, with the
+# suffix applied client-side before any metadata lookup.
+VANITY_POLL_INTERVAL = env_int("VANITY_POLL_INTERVAL", 3)
+# ERC-20/721 Transfer(address indexed from, address indexed to, ...)
+TRANSFER_TOPIC0 = (
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+ZERO_TOPIC = "0x" + "0" * 64
+
 # Safety Deposit Box lockers. An LP lock is the strongest launch signal on
 # this ecosystem: it means liquidity was just committed for a token.
 LP_LOCKERS = {
@@ -238,9 +254,7 @@ TEST_TOKEN_PATTERN = env("TEST_TOKEN_PATTERN", r"test|tstdonotbuy|donotbuy|scram
 # up., Uniswap V3, or anything else — and stays provenance-safe because only
 # already-confirmed launchpad tokens are ever watched.
 LIQUIDITY_WATCH = env_bool("LIQUIDITY_WATCH", True)
-# ERC-20 Transfer(address indexed from, address indexed to, uint256)
-TRANSFER_TOPIC0 = (
-    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+# TRANSFER_TOPIC0 is defined once with the vanity-watch constants above.
 # Recipients that are plumbing rather than a pool.
 NON_POOL_RECIPIENTS = set(LP_LOCKERS) | {
     "0x73991a25c818bf1f1128deaab1492d45638de0d3",  # V3 PositionManager

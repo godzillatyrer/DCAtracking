@@ -14,7 +14,32 @@ blasts it to Telegram (and optionally Twilio SMS / macOS popups).
 | 1. API sniper | `stonkbrokers.cash/api/launcher/tokens` + `/highlights`; new CAs get the detail endpoint called and are auto-tracked | 10s → 5s (last 24h) → **2s in the war room** (1h before → 2h after T0) → 10s |
 | 2. On-chain | Team wallets `0xb668…7CDa` and `0xBe49…8215`: outgoing txs alert, contract creations are auto-armed as **candidate factories** and scanned topic-agnostically with chunked `eth_getLogs`; token addresses are extracted from indexed topics and confirmed via Blockscout | 20s → **5s in the war room** |
 | 2d. Factory learning | Resolves the creator of every confirmed launchpad token and arms it, so later launches are caught from the factory's own logs | same as track 2 |
+| 2e. Vanity mint watch | **Every mint on the chain**, filtered to addresses ending in the launcher's CREATE2 vanity suffix | **every 3s, always** |
 | 3. Frontend diff | The launcher page + its `/_next/static/chunks/*.js` bundles, diffed for new contract addresses and Vercel redeploys | hourly |
+
+### Vanity mint watch — the fastest CA capture
+
+Launcher tokens are CREATE2-mined to end in `666666`, confirmed on STONKS,
+STONKCAT and BROKE. A random address ends that way about **once in 16.7
+million**, so the suffix is a sharp filter rather than a heuristic.
+
+That is precisely what the reverted chain-wide mint watch lacked: it alerted
+on every token on the chain and drowned in unrelated memecoins. Here the
+suffix is applied client-side *before* any metadata lookup, so a 3-second
+poll costs one topic-filtered `eth_getLogs` and nothing else.
+
+The trigger is the **mint** — `Transfer` from the zero address, the first
+event a token emits — so it fires the instant the token exists, ahead of the
+launcher API and ahead of any indexer.
+
+The alert leads with the bare CA and sends **even when metadata is
+unavailable**, because a brand-new contract is usually not indexed yet and
+waiting for a name would trade away the speed this exists for. Provenance is
+labelled when it can be resolved: `FROM THE STONK LAUNCHPAD`, or
+`NOT from the known launchpad (deployed by 0x…)` — since anyone can mine the
+same suffix, an imitator is called out rather than passed off.
+
+Tune with `VANITY_SUFFIX`, `VANITY_POLL_INTERVAL`, or `VANITY_WATCH=0`.
 
 ### Only launchpad tokens alert — how that's enforced
 
