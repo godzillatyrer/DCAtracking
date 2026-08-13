@@ -49,94 +49,130 @@ def cmd_test_alert(pipeline: AlertPipeline) -> int:
     return 0
 
 
-def cmd_check_ca(state: State, ca: str) -> int:
-    """Answer 'is this CA a Stonk Launcher launch?' from on-chain provenance.
+def _describe_ca(bs, state: State, ca: str) -> dict:
+    """Resolve one contract's identity and deployer. No printing."""
+    out = {"ca": ca, "error": None, "creator": None, "reasons": [],
+           "name": "?", "symbol": "?", "supply": "?"}
+    try:
+        info = bs.classify_address(ca)
+    except Exception as exc:
+        out["error"] = f"lookup failed: {exc}"
+        return out
+    if not info.get("exists"):
+        out["error"] = "no contract at this address on this chain"
+        return out
 
-    Uses the same provenance rule the watcher enforces: what matters is who
-    deployed the token, never what it is called or what its address looks
-    like.
+    token = info.get("token") or {}
+    out["name"] = str(token.get("name") or "?")
+    out["symbol"] = str(token.get("symbol") or "?")
+    out["supply"] = str(token.get("total_supply")
+                        or token.get("totalSupply") or "?")
+    try:
+        creator = (bs.creation_info(ca).get("creator") or "").lower()
+    except Exception as exc:
+        out["error"] = f"creator lookup failed: {exc}"
+        return out
+    if not creator:
+        out["error"] = "creator not indexed yet — re-run shortly"
+        return out
+    out["creator"] = creator
+
+    known = config.KNOWN_STONK_FACTORIES.get(creator)
+    if known:
+        out["reasons"].append(f"creator is the known StonkBrokers {known}")
+    armed = state.candidate_factories().get(creator)
+    if armed:
+        out["reasons"].append(
+            f"creator is an armed factory (source: {armed.get('source')})")
+        if armed.get("confirmed_launcher"):
+            out["reasons"].append("creator is a CONFIRMED LauncherFactory")
+    try:
+        ident = bs.identify_launcher(creator)
+        if ident.get("is_launcher"):
+            out["reasons"].append(
+                f"creator ABI exposes {', '.join(ident['markers'])}")
+        out["creator_name"] = ident.get("name")
+        out["creator_is_contract"] = bs.classify_address(creator).get("is_contract")
+    except Exception:
+        out["creator_is_contract"] = None
+    return out
+
+
+def cmd_check_ca(state: State, addresses) -> int:
+    """Identify the deployer of one or more contracts.
+
+    Given several tokens from the same launchpad, the deployer they share
+    IS the factory — which is how the address is derived when it has never
+    been published.
     """
     from stonk_watcher.alerts import is_target_token, verdict_for_target
     from stonk_watcher.blockscout import BlockscoutClient
 
-    ca = ca.strip().lower()
-    if not (ca.startswith("0x") and len(ca) == 42):
-        print(f"Not an address: {ca}")
-        return 2
+    cleaned = []
+    for raw in addresses:
+        ca = raw.strip().lower().rstrip(",")
+        if not (ca.startswith("0x") and len(ca) == 42):
+            print(f"Not an address: {raw}")
+            return 2
+        cleaned.append(ca)
 
     bs = BlockscoutClient()
-    print(f"checking {ca}\n")
-    try:
-        info = bs.classify_address(ca)
-    except Exception as exc:  # network/parse — report, do not pretend
-        print(f"FAILED to reach Blockscout: {exc}")
+    results = []
+    for ca in cleaned:
+        print(f"=== {ca}")
+        res = _describe_ca(bs, state, ca)
+        results.append(res)
+        if res["error"]:
+            print(f"    {res['error']}\n")
+            continue
+        print(f"    token:   {res['name']} ({res['symbol']})")
+        print(f"    supply:  {res['supply']}")
+        print(f"    creator: {res['creator']}")
+        if res.get("creator_name"):
+            print(f"    creator verified as: {res['creator_name']}")
+        if res.get("creator_is_contract") is False:
+            print("    creator is a WALLET — hand-deployed, not a launchpad token")
+        for reason in res["reasons"]:
+            print(f"    - {reason}")
+        if is_target_token(res["name"], res["symbol"]):
+            verdict, note = verdict_for_target(res["supply"], res["symbol"],
+                                               res["name"])
+            print(f"    name matches {config.TARGET_TOKEN_NAME}: "
+                  f"{verdict.upper()} — {note}")
+        print()
+
+    creators = {r["creator"] for r in results if r["creator"]}
+    resolved = [r for r in results if r["creator"]]
+    print("=" * 60)
+    if not creators:
+        print("VERDICT: could not resolve any creator. Nothing concluded.")
         return 3
-    if not info.get("exists"):
-        print("VERDICT: NOT A CONTRACT ON THIS CHAIN — nothing deployed here.")
+    if len(creators) == 1 and len(resolved) > 1:
+        factory = creators.pop()
+        contract = all(r.get("creator_is_contract") is not False
+                       for r in resolved)
+        print(f"COMMON CREATOR across {len(resolved)} tokens:\n\n  {factory}\n")
+        if not contract:
+            print("But that creator is a WALLET, not a contract — these were")
+            print("deployed by hand from one address, not by a factory.")
+            return 1
+        print("All of these tokens were deployed by that one contract, so it")
+        print("is the launchpad factory. Arm it with:\n")
+        print(f"  WATCH_CONTRACTS={factory}\n")
+        print("Every future launch through it then alerts from chain.")
+        return 0
+    if len(resolved) > 1:
+        print("DIFFERENT CREATORS — these did not all come from one factory:")
+        for r in resolved:
+            print(f"  {r['ca']} <- {r['creator']}")
         return 1
-
-    token = info.get("token") or {}
-    name = str(token.get("name") or "?")
-    symbol = str(token.get("symbol") or "?")
-    supply = str(token.get("total_supply") or token.get("totalSupply") or "?")
-    print(f"  token:    {name} ({symbol})")
-    print(f"  supply:   {supply}")
-    print(f"  contract: {info.get('is_contract')}")
-
-    try:
-        creation = bs.creation_info(ca)
-    except Exception as exc:
-        print(f"\nFAILED to read creator: {exc}")
-        return 3
-    creator = (creation.get("creator") or "").lower()
-    if not creator:
-        print("\nVERDICT: UNKNOWN — creator not indexed yet. Re-run shortly.")
-        return 1
-    print(f"  creator:  {creator}")
-
-    reasons = []
-    known = config.KNOWN_STONK_FACTORIES.get(creator)
-    if known:
-        reasons.append(f"creator is the known StonkBrokers {known}")
-    armed = state.candidate_factories().get(creator)
-    if armed:
-        reasons.append(f"creator is an armed factory (source: {armed.get('source')})")
-        if armed.get("confirmed_launcher"):
-            reasons.append("creator is a CONFIRMED LauncherFactory by ABI")
-    ident = bs.identify_launcher(creator)
-    if ident.get("is_launcher"):
-        reasons.append(f"creator ABI exposes {', '.join(ident['markers'])}")
-    if ident.get("name"):
-        print(f"  creator verified as: {ident['name']}")
-
-    creator_info = bs.classify_address(creator)
-    if not creator_info.get("is_contract"):
-        print("\nVERDICT: NOT A LAUNCHPAD TOKEN.")
-        print("  The creator is a plain wallet, so this was hand-deployed.")
-        print("  A launchpad token is deployed BY the launchpad contract.")
-        return 1
-
-    print()
-    if reasons:
-        print("VERDICT: LAUNCHPAD TOKEN — deployed by the launchpad.")
-        for reason in reasons:
-            print(f"  - {reason}")
-    else:
-        print("VERDICT: UNCONFIRMED — deployed by a contract we cannot tie to")
-        print("  the Stonk Launcher. It may be another launchpad or factory.")
-        print(f"  Compare {creator} against the factory in your")
-        print("  *** LAUNCHER FACTORY FOUND *** alert, if you have one.")
-
-    if is_target_token(name, symbol):
-        state_word, note = verdict_for_target(supply, symbol, name)
-        print(f"\n  name matches {config.TARGET_TOKEN_NAME}: {state_word.upper()}")
-        print(f"  {note}")
-        print("  Duplicate tickers exist on this chain — the creator above is")
-        print("  what decides, not the name.")
-    if ca.endswith("666666"):
-        print("\n  note: the ...666666 vanity suffix is the launcher's pattern,")
-        print("  but anyone can mine it. It is not evidence either way.")
-    return 0 if reasons else 1
+    single = resolved[0]
+    if single["reasons"]:
+        print("VERDICT: LAUNCHPAD TOKEN.")
+        return 0
+    print("VERDICT: UNCONFIRMED — creator is not a factory we recognise.")
+    print(f"  Creator: {single['creator']}")
+    return 1
 
 
 def cmd_status(state: State) -> int:
@@ -168,8 +204,9 @@ def main() -> int:
                         help="print state summary and exit")
     parser.add_argument("--once", action="store_true",
                         help="run one cycle of each component and exit")
-    parser.add_argument("--check-ca", metavar="ADDRESS", default=None,
-                        help="is this contract a Stonk Launcher launch?")
+    parser.add_argument("--check-ca", metavar="ADDRESS", nargs="+", default=None,
+                        help="identify the deployer of one or more contracts; "
+                             "a shared deployer across tokens IS the factory")
     parser.add_argument("--port", type=int, default=None,
                         help="serve a JSON health endpoint on this port "
                              "(defaults to $PORT when set)")
