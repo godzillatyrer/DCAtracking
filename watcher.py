@@ -24,7 +24,6 @@ from stonk_watcher.chain_watcher import ChainWatcher
 from stonk_watcher.frontend_diff import FrontendDiffer
 from stonk_watcher.health import start_health_server
 from stonk_watcher.state import State, as_checklist
-from stonk_watcher.vanity_watcher import VanityWatcher
 from stonk_watcher.supervisor import Supervisor
 
 
@@ -32,7 +31,6 @@ def build_components(state, pipeline, errors):
     return [
         ApiPoller(state, pipeline, errors),
         ChainWatcher(state, pipeline, errors),
-        VanityWatcher(state, pipeline, errors),
         FrontendDiffer(state, pipeline, errors),
     ]
 
