@@ -166,11 +166,11 @@ scenario "Just Air|AIR|MINTfree1|free|on_curve"
 run >/dev/null                                    # establish the baseline silently
 raw_scenario "$(listed WEIRD MINTweird1 free brand_new_status)"
 out=$(run)
-check "schema drift reported" "$(echo "$out" | grep -c 'changed shape')" "1"
+check "schema drift reported" "$(echo "$out" | grep -c 'never seen before')" "1"
 
 echo "== test 17: drift is reported once, not every tick =="
 out=$(run)
-check "drift not repeated" "$(echo "$out" | grep -c 'changed shape')" "0"
+check "drift not repeated" "$(echo "$out" | grep -c 'never seen before')" "0"
 
 echo "== test 18: SCHEMA_DRIFT_ALERT=false disables it =="
 rm -f $STATE
@@ -178,7 +178,7 @@ scenario "Just Air|AIR|MINTfree1|free|on_curve"
 env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true SCHEMA_DRIFT_ALERT=false node watch.mjs >/dev/null 2>&1
 raw_scenario "$(listed WEIRD MINTweird2 free another_status)"
 out=$(env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true SCHEMA_DRIFT_ALERT=false node watch.mjs 2>&1)
-check "no drift notice when disabled" "$(echo "$out" | grep -c 'changed shape')" "0"
+check "no drift notice when disabled" "$(echo "$out" | grep -c 'never seen before')" "0"
 
 # --- liveness ---------------------------------------------------------------
 echo "== test 19: a blind watcher alerts instead of failing silently =="
@@ -220,6 +220,96 @@ check "heartbeat sent" "$(echo "$out" | grep -c 'alive')" "1"
 echo "== test 23: heartbeat stays quiet inside the interval =="
 out=$(env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true HEARTBEAT_MS=3600000 node watch.mjs 2>&1)
 check "no premature heartbeat" "$(echo "$out" | grep -c 'alive')" "0"
+
+
+# --- burns and status side channels -----------------------------------------
+# These live on other endpoints (/leaderboard/burners, /config, /listing/config,
+# /gate). The mock serves them from sidecar files next to the scenario, and 404s
+# when a sidecar is absent — which is itself a case worth testing.
+BURNERS=/tmp/burners.json
+CONFIG=/tmp/config.json
+LISTING=/tmp/listing.json
+GATE=/tmp/gate.json
+clear_sidecars() { rm -f $BURNERS $CONFIG $LISTING $GATE; }
+# "bronze" is the internal key for Gold. Price 0.2941 => 10,000 ANSEM ~= $2,941.
+write_config() { printf '{"tierThresholds":{"bronze":92627,"diamond":370508,"ansemPriceUsd":0.2941}}' > $CONFIG; }
+burners() { printf '[%s]' "$1" > $BURNERS; }
+burner() { printf '{"wallet":"%s","amount":%s,"firstBurnAt":"2026-08-17T16:58:12.359Z"}' "$1" "$2"; }
+
+S1=(env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true STATUS_POLL_EVERY=1)
+
+echo "== test 24: existing burners are seeded silently, then increases alert =="
+rm -f $STATE; clear_sidecars; write_config
+scenario "Just Air|AIR|MINTfree1|free|on_curve"
+burners "$(burner WALLETaaa 50000)"
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "first run seeds burners silently" "$(echo "$out" | grep -c 'Wallet total:')" "0"
+burners "$(burner WALLETaaa 60000)"
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "a 10k increase alerts" "$(echo "$out" | grep -c 'Wallet total:')" "1"
+
+echo "== test 25: the same total does not re-alert =="
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "no repeat for unchanged total" "$(echo "$out" | grep -c 'Wallet total:')" "0"
+
+echo "== test 26: dust burns are filtered =="
+burners "$(burner WALLETaaa 60500)"   # +500 ANSEM ~= $147, under the $1000 floor
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "sub-floor burn ignored" "$(echo "$out" | grep -c 'Wallet total:')" "0"
+
+echo "== test 27: a threshold crossing beats the dust filter =="
+rm -f $STATE
+burners "$(burner WALLETbbb 90000)"
+"${S1[@]}" node watch.mjs >/dev/null 2>&1        # seed below Gold
+burners "$(burner WALLETbbb 95000)"             # crosses 92,627
+out=$("${S1[@]}" BURN_MIN_USD=999999 node watch.mjs 2>&1)
+check "crossing reported despite the floor" "$(echo "$out" | grep -c 'Wallet total:')" "1"
+check "and names the tier" "$(echo "$out" | grep -c 'Crosses the')" "1"
+
+echo "== test 28: a brand-new burner wallet alerts =="
+burners "$(burner WALLETbbb 95000),$(burner WALLETccc 40000)"
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "new wallet alerts" "$(echo "$out" | grep -c 'Wallet total:')" "1"
+
+echo "== test 29: WATCH_BURNS=false disables the channel =="
+burners "$(burner WALLETbbb 95000),$(burner WALLETccc 90000)"
+out=$("${S1[@]}" WATCH_BURNS=false node watch.mjs 2>&1)
+check "no burn alert when disabled" "$(echo "$out" | grep -c 'Wallet total:')" "0"
+
+echo "== test 30: listings reopening is announced =="
+rm -f $STATE; clear_sidecars; write_config
+printf '{"enabled":false,"usdAmount":25000,"ansemPriceUsd":0.2873,"burnAvailable":true,"airdropAvailable":true}' > $LISTING
+"${S1[@]}" node watch.mjs >/dev/null 2>&1       # record the paused state
+printf '{"enabled":true,"usdAmount":25000,"ansemPriceUsd":0.2873,"burnAvailable":true,"airdropAvailable":true}' > $LISTING
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "listings-open alert sent" "$(echo "$out" | grep -c 'accepting paid listings again')" "1"
+
+echo "== test 31: an unchanged listing status stays quiet =="
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "no repeat while open" "$(echo "$out" | grep -c 'accepting paid listings again')" "0"
+
+echo "== test 32: a gate change is reported =="
+printf '{"mode":"countdown","launchAt":"2026-08-18T13:40:00.000Z","autoOpen":true}' > $GATE
+"${S1[@]}" node watch.mjs >/dev/null 2>&1       # record the countdown
+printf '{"mode":"open","launchAt":null,"autoOpen":true}' > $GATE
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "gate change reported" "$(echo "$out" | grep -c 'gates the whole site')" "1"
+
+echo "== test 33: missing side channels never break the tier watcher =="
+rm -f $STATE; clear_sidecars                      # every side endpoint now 404s
+scenario "Hyper Bull|HBULL|MINTgold1|gold|migrated"
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "gold alert still sent" "$(echo "$out" | grep -c 'would send')" "1"
+check "no crash" "$(echo "$out" | grep -c 'ERROR during check')" "0"
+
+echo "== test 34: burns with thresholds unavailable still report the amount =="
+rm -f $STATE; clear_sidecars                      # no /config => no price, no thresholds
+burners "$(burner WALLETddd 10000)"
+"${S1[@]}" node watch.mjs >/dev/null 2>&1
+burners "$(burner WALLETddd 80000)"
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "burn still reported without a price" "$(echo "$out" | grep -c 'Wallet total:')" "1"
+clear_sidecars
 
 echo
 echo "passed: $pass   failed: $fail"

@@ -135,6 +135,81 @@ All via environment variables (or a `.env` file if you run with `--env-file=.env
 | `SCHEMA_DRIFT_ALERT` | `true` | alert on an unseen `tier`/`status` value |
 | `STALE_ALERT_MS` | `600000` | alert if no fetch has succeeded in this long |
 | `HEARTBEAT_MS` | `86400000` | periodic "still alive" message; `0` disables |
+| `WATCH_BURNS` | `true` | alert on $ANSEM burns from the burners leaderboard |
+| `BURN_MIN_USD` | `1000` | ignore burns below this; threshold crossings ignore it |
+| `WATCH_STATUS` | `true` | alert when listings reopen or the site gate changes |
+| `STATUS_POLL_EVERY` | `10` | poll those every Nth tick (they change rarely) |
+
+---
+
+## Burns
+
+Burning $ANSEM is how a team pays the $25,000 listing fee **and** how it climbs
+the tier ladder — the same act does both. So a burn is the earliest warning that
+a listing is coming, ahead of anything appearing in `/api/coins`.
+
+Read from `/api/leaderboard/burners`, which returns cumulative totals per wallet.
+A burn is therefore an **increase**, not a new row — a wallet that burns twice
+shows up once with a larger number.
+
+### The site's own wording is wrong, and it matters
+
+Both `/burn` and the token docs say burns "go to the community burn wallet". On
+chain they are plain `BurnChecked` instructions on spl-token-2022 with **no
+destination account** — total supply simply drops.
+
+A monitor built on the site's description — watching for transfers into a burn
+wallet — would have sat silent forever and never errored. That is the exact
+failure mode worth avoiding: not a crash, but a plausible-looking watcher that
+can never fire. Reading the leaderboard sidesteps the question entirely and gives
+us the wallet, which a supply diff would not.
+
+### Tier thresholds are dynamic — never hardcode them
+
+Two contradictory sets are live simultaneously:
+
+| Source | Gold | Diamond |
+|---|---|---|
+| the `/burn` page | 25,000 | 100,000 |
+| `/api/config` | 92,627 | 370,508 |
+
+The API recomputes from the live $ANSEM price, so its numbers move daily. We read
+`/api/config` every `STATUS_POLL_EVERY` ticks and use that. Note the internal key
+for Gold is **`bronze`**.
+
+A burn is reported when it exceeds `BURN_MIN_USD`, **or** when it crosses a tier
+threshold — a crossing is the whole point, so it overrides the dust filter.
+
+If `/api/config` is unreachable the price is unknown, and an unknown price must
+not read as `$0` — otherwise every burn is dust-filtered and the alert silently
+disappears. Burns are reported without a USD figure in that case.
+
+## Listing status
+
+`/api/listing/config` returns `{enabled, usdAmount, burnAvailable, airdropAvailable}`.
+`enabled` flipping to `true` is the moment paid listings reopen, and it fires a
+🟩 **LISTINGS ARE OPEN** message.
+
+`/api/gate` carries a site-wide countdown (`{mode, launchAt, autoOpen}`). Any
+change to it is reported.
+
+Both are polled every `STATUS_POLL_EVERY` ticks rather than every tick — they
+change rarely, and request volume against a Cloudflare-fronted origin is not free.
+
+## What is *not* watched, and why
+
+**On-chain burns directly.** The leaderboard is the site's own accounting and is
+what actually gates listings and tiers, so it is the more meaningful source. A
+`getTokenSupply` diff would catch burns the leaderboard omits, but cannot say who
+burned. Worth adding only if the leaderboard proves incomplete — it already looks
+partial (25 wallets summing to ~175,738 against ~268,684 total burned).
+
+**The airdrop payment route.** A team can pay by airdropping their own token to
+$ANSEM holders instead of burning. Each coin gets its own merkle-distributor PDA
+and vault, so there is no single address to watch, and whether the paid-listing
+route reuses that machinery is unverified — no listing has ever gone through.
+Such a listing would still be caught when the coin appears in `/api/coins`; only
+the early warning is missing.
 
 ---
 

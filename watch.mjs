@@ -64,6 +64,21 @@ const CFG = {
   // Periodic "still alive" message so silence is distinguishable from breakage.
   // 0 disables it.
   heartbeatMs: clampInt(process.env.HEARTBEAT_MS, 86_400_000, 0, 604_800_000),
+
+  // $ANSEM burns, read from /api/leaderboard/burners. Burning is how a team pays
+  // the listing fee and how it climbs the tier ladder, so a burn is the earliest
+  // warning that a listing is coming.
+  watchBurns: !/^(0|false|no)$/i.test(process.env.WATCH_BURNS || 'true'),
+  // Ignore dust. A burn that crosses a tier threshold or the listing fee is
+  // always reported regardless of this floor.
+  burnMinUsd: clampInt(process.env.BURN_MIN_USD, 1_000, 0, 1_000_000),
+
+  // /api/listing/config.enabled flipping true is the moment listings reopen;
+  // /api/gate carries a site-wide countdown. Neither changes often, so they are
+  // polled every Nth tick rather than every tick — the endpoint is behind
+  // Cloudflare and request volume is not free.
+  watchStatus: !/^(0|false|no)$/i.test(process.env.WATCH_STATUS || 'true'),
+  statusEvery: clampInt(process.env.STATUS_POLL_EVERY, 10, 1, 1_000),
 };
 
 function clampInt(raw, dflt, min, max) {
@@ -96,6 +111,16 @@ const emptyState = () => ({
   // new product surface (a paid listing looks different from a curve launch) or
   // a schema change — both worth a message.
   knownStatuses: [],
+
+  // wallet -> cumulative $ANSEM burned, as last seen. Diffed each tick.
+  burners: {},
+  // Live values from /api/config, refreshed periodically. Never hardcode these:
+  // the site renders 25,000/100,000 on /burn while the API returns 92,627/370,508,
+  // because the API recomputes them from the current $ANSEM price.
+  tierThresholds: null,
+  ansemPriceUsd: null,
+  listingEnabled: null,
+  gate: null,
 });
 
 async function loadState() {
@@ -107,6 +132,7 @@ async function loadState() {
       ...parsed,
       seen: parsed.seen ?? {},
       knownStatuses: Array.isArray(parsed.knownStatuses) ? parsed.knownStatuses : [],
+      burners: parsed.burners ?? {},
     };
   } catch (err) {
     if (err.code !== 'ENOENT') {
@@ -143,10 +169,19 @@ async function fetchWithRetry(url, opts = {}, attempts = CFG.fetchAttempts) {
         lastErr = new Error(`HTTP ${res.status}`);
         continue;
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+      if (!res.ok) {
+        // 404 is a permanent answer — the endpoint is not there, and asking three
+        // more times just multiplies load against a Cloudflare-fronted origin.
+        // Deliberately narrow: 403 is what a Cloudflare *challenge* returns, and
+        // those are transient and must keep retrying.
+        const err = new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+        if (res.status === 404) err.permanent = true;
+        throw err;
+      }
       return res;
     } catch (err) {
       lastErr = err;
+      if (err.permanent) break;
     }
   }
   throw lastErr ?? new Error('fetch failed');
@@ -164,6 +199,154 @@ async function fetchCoins() {
     throw new Error(`Unexpected response shape: ${JSON.stringify(body).slice(0, 200)}`);
   }
   return body.coins;
+}
+
+// ------------------------------------------------------------- side channels
+//
+// Everything below reads an endpoint other than /api/coins. Each one is wrapped
+// by its caller so a shape change or a 404 can never take down the tier watcher,
+// which is the part that has actually been verified against production.
+
+const apiBase = () => CFG.apiUrl.replace(/\/coins\/?$/, '');
+
+async function fetchJson(pathSuffix) {
+  const res = await fetchWithRetry(`${apiBase()}${pathSuffix}`, {
+    headers: { accept: 'application/json', 'user-agent': 'ansem-tier-watch/1.0' },
+  });
+  return res.json();
+}
+
+function num(n, digits = 0) {
+  if (n == null || !Number.isFinite(Number(n))) return '—';
+  return Number(n).toLocaleString('en-US', {
+    minimumFractionDigits: digits, maximumFractionDigits: digits,
+  });
+}
+
+/**
+ * $ANSEM burns.
+ *
+ * The site's own copy says burns "go to the community burn wallet", but on-chain
+ * they are plain `BurnChecked` instructions with no destination — total supply
+ * simply drops. A monitor watching a recipient wallet would therefore sit silent
+ * forever and never error. We sidestep the question entirely by reading the
+ * site's own burners leaderboard, which is authoritative for what it counts and
+ * gives us the wallet, which a supply diff would not.
+ *
+ * Amounts are cumulative per wallet, so a burn is an *increase*, not a new row.
+ */
+async function checkBurns(state, isFirstRun) {
+  const body = await fetchJson('/leaderboard/burners');
+  const rows = Array.isArray(body?.burners) ? body.burners : null;
+  if (!rows) {
+    vlog('burners: no "burners" array in response, skipping');
+    return [];
+  }
+
+  // Number(null) is 0, not NaN. Left unguarded that makes every burn worth $0
+  // and silently dust-filtered the moment /api/config is unreachable — losing
+  // precisely the alert this exists for. An unknown price must mean "unknown".
+  const rawPrice = Number(state.ansemPriceUsd);
+  const price = Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice : null;
+  const gold = Number(state.tierThresholds?.bronze);      // "bronze" is Gold internally
+  const diamond = Number(state.tierThresholds?.diamond);
+  const notices = [];
+
+  for (const row of rows) {
+    const wallet = row?.wallet;
+    const total = Number(row?.amount);
+    if (!wallet || !Number.isFinite(total)) continue;
+
+    const prev = Number(state.burners[wallet] ?? 0);
+    state.burners[wallet] = total;
+    if (isFirstRun) continue;
+
+    const delta = total - prev;
+    if (delta <= 0) continue;
+
+    const deltaUsd = price != null ? delta * price : null;
+    const crossed = [];
+    if (Number.isFinite(gold) && prev < gold && total >= gold) crossed.push('🥇 GOLD');
+    if (Number.isFinite(diamond) && prev < diamond && total >= diamond) crossed.push('💎 DIAMOND');
+
+    // A threshold crossing is the whole point, so it outranks the dust filter.
+    if (!crossed.length && deltaUsd != null && deltaUsd < CFG.burnMinUsd) continue;
+
+    const lines = [
+      `<b>🔥 $ANSEM BURN</b>`,
+      '',
+      `Burned: <b>${num(delta, 2)} ANSEM</b>${deltaUsd != null ? ` (~${money(deltaUsd)})` : ''}`,
+      `Wallet total: ${num(total, 2)} ANSEM`,
+      `<code>${esc(wallet)}</code>`,
+    ];
+    if (crossed.length) {
+      lines.push('', `<b>Crosses the ${crossed.join(' and ')} threshold.</b>`,
+                 `A listing or tier upgrade for this wallet is likely next.`);
+    } else if (Number.isFinite(gold) && total < gold) {
+      lines.push('', `${num(gold - total, 0)} ANSEM short of Gold (${num(gold, 0)}).`);
+    }
+    notices.push(lines.join('\n'));
+  }
+  return notices;
+}
+
+/**
+ * Listing availability, tier thresholds and the site-wide gate.
+ *
+ * Thresholds are read rather than hardcoded on purpose: /burn renders
+ * 25,000/100,000 while /api/config returns 92,627/370,508 for the same tiers,
+ * because the API recomputes them from the live $ANSEM price. Pinning either
+ * number would have gone stale within a day.
+ */
+async function refreshStatus(state, isFirstRun) {
+  const notices = [];
+
+  const cfg = await fetchJson('/config').catch(err => {
+    vlog(`config: ${err.message}`); return null;
+  });
+  if (cfg?.tierThresholds) {
+    state.tierThresholds = cfg.tierThresholds;
+    const p = Number(cfg.tierThresholds.ansemPriceUsd);
+    if (Number.isFinite(p) && p > 0) state.ansemPriceUsd = p;
+  }
+
+  const listing = await fetchJson('/listing/config').catch(err => {
+    vlog(`listing/config: ${err.message}`); return null;
+  });
+  if (listing && typeof listing.enabled === 'boolean') {
+    const was = state.listingEnabled;
+    state.listingEnabled = listing.enabled;
+    if (!isFirstRun && was !== null && was !== listing.enabled) {
+      notices.push(listing.enabled
+        ? `<b>🟩 LISTINGS ARE OPEN</b>\n\n` +
+          `ansem.io is accepting paid listings again.\n` +
+          `Fee: <b>${money(listing.usdAmount)}</b>` +
+          (Number.isFinite(Number(listing.ansemPriceUsd)) && Number(listing.usdAmount) > 0
+            ? ` (~${num(Number(listing.usdAmount) / Number(listing.ansemPriceUsd), 0)} ANSEM)`
+            : '') + '\n' +
+          `Burn: ${listing.burnAvailable ? 'yes' : 'no'}   ` +
+          `Airdrop route: ${listing.airdropAvailable ? 'yes' : 'no'}\n\n` +
+          `New listings should start appearing in the feed.`
+        : `<b>🟥 Listings paused</b>\n\nansem.io stopped accepting paid listings.`);
+    }
+  }
+
+  const gate = await fetchJson('/gate').catch(err => {
+    vlog(`gate: ${err.message}`); return null;
+  });
+  if (gate && typeof gate === 'object') {
+    const now = JSON.stringify({ mode: gate.mode ?? null, launchAt: gate.launchAt ?? null });
+    const was = state.gate;
+    state.gate = now;
+    if (!isFirstRun && was && was !== now) {
+      notices.push(
+        `<b>⏳ Site gate changed</b>\n\n` +
+        `Was: <code>${esc(was)}</code>\nNow: <code>${esc(now)}</code>\n\n` +
+        `This is the countdown that gates the whole site.`);
+    }
+  }
+
+  return notices;
 }
 
 // ---------------------------------------------------------------- formatting
@@ -325,6 +508,26 @@ async function checkOnce(state) {
     );
   }
 
+  // --- side channels --------------------------------------------------------
+  // Status first, so a burn is measured against fresh thresholds. Both are
+  // wrapped: these endpoints were mapped from the browser, not verified here, so
+  // a shape change must degrade to a log line rather than take down the watcher.
+  if (CFG.watchStatus && (isFirstRun || state.runs % CFG.statusEvery === 0)) {
+    try {
+      notices.push(...await refreshStatus(state, isFirstRun));
+    } catch (err) {
+      vlog(`status channels unavailable: ${err.message}`);
+    }
+  }
+
+  if (CFG.watchBurns) {
+    try {
+      notices.push(...await checkBurns(state, isFirstRun));
+    } catch (err) {
+      vlog(`burn channel unavailable: ${err.message}`);
+    }
+  }
+
   state.runs += 1;
   state.lastRunAt = new Date().toISOString();
   state.lastOkAt = new Date().toISOString();
@@ -340,13 +543,15 @@ async function checkOnce(state) {
   }
 
   for (const text of notices) {
+    const label = text.match(/<b>(.*?)<\/b>/)?.[1] ?? 'notice';
     try {
       await sendTelegram(text);
-      log('alerted: schema drift');
+      log(`alerted: ${label}`);
     } catch (err) {
-      // No rollback: knownStatuses has already absorbed the new value, so this
-      // fires once at most either way. Losing it is better than looping on it.
-      log(`ERROR sending schema-drift notice: ${err.message}`);
+      // No rollback. Every notice source (drift, burns, status) has already
+      // absorbed the change into state, so each fires once at most either way.
+      // Losing one is better than looping on it forever.
+      log(`ERROR sending notice (${label}): ${err.message}`);
     }
     await sleep(1_200);
   }
