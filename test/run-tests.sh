@@ -349,6 +349,38 @@ check "listing still alerts" "$(echo "$out" | grep -c 'PAID LISTING')" "1"
 check "stale burn omitted" "$(echo "$out" | grep -c 'Burns in the last hour')" "0"
 clear_sidecars
 
+
+# --- tier wire names --------------------------------------------------------
+# The API returns "bronze" where the site shows a GOLD badge. Matching on "gold"
+# skipped every Gold coin silently — no error, just no alert.
+echo "== test 38: tier \"bronze\" is Gold and alerts =="
+rm -f $STATE; clear_sidecars
+scenario "Zed|Z|MINTbronze1|bronze|on_curve"
+out=$(run)
+check "bronze coin alerts" "$(echo "$out" | grep -c 'would send')" "1"
+check "shown as GOLD" "$(echo "$out" | grep -c 'GOLD')" "1"
+
+echo "== test 39: bronze is not reported as drift =="
+check "no drift for a known wire value" "$(echo "$out" | grep -c 'never seen before')" "0"
+
+echo "== test 40: WATCH_TIERS=bronze and =gold behave identically =="
+rm -f $STATE
+scenario "Zed|Z|MINTbronze1|bronze|on_curve"
+out=$(run WATCH_TIERS=bronze)
+check "bronze accepted as a config value" "$(echo "$out" | grep -c 'would send')" "1"
+
+echo "== test 41: a genuinely new tier is reported once, not every tick =="
+rm -f $STATE
+scenario "Just Air|AIR|MINTfree1|free|on_curve"
+run >/dev/null 2>&1                               # establish the baseline
+scenario "Odd|ODD|MINTodd1|platinum|on_curve"
+out=$(run)
+check "new tier reported" "$(echo "$out" | grep -c 'never seen before')" "1"
+out=$(run)
+# This is the bug that spammed a notice every minute: the check compared against
+# a constant, so a value the API always returns never stopped looking new.
+check "and not repeated on the next tick" "$(echo "$out" | grep -c 'never seen before')" "0"
+
 echo
 echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]
