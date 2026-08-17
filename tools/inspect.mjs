@@ -16,32 +16,65 @@ const URL_ = `${process.env.ANSEM_API_URL || 'https://ansem.io/api/coins'}?limit
 // JSON; sending the same headers watch.mjs sends gets through.
 const HEADERS = { accept: 'application/json', 'user-agent': 'ansem-tier-watch/1.0' };
 
-const ctl = new AbortController();
-const timer = setTimeout(() => ctl.abort(), 20_000);
-const res = await fetch(URL_, { headers: HEADERS, signal: ctl.signal });
-clearTimeout(timer);
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const ctype = res.headers.get('content-type') || '(none)';
+// Cloudflare challenges some fraction of requests rather than all of them, so a
+// single probe tells you almost nothing. Probe a handful of times and report the
+// hit rate — that ratio is the actual health metric for feed access, and it is
+// what decides whether FETCH_ATTEMPTS=4 in watch.mjs is generous or marginal.
+const ATTEMPTS = Number(process.env.PROBE_ATTEMPTS || 6);
+
 console.log(`GET ${URL_}`);
-console.log(`  status       : ${res.status} ${res.statusText}`);
-console.log(`  content-type : ${ctype}`);
-const mitigated = res.headers.get('cf-mitigated');
-if (mitigated) console.log(`  cf-mitigated : ${mitigated}`);
+console.log(`probing ${ATTEMPTS}x to measure the Cloudflare challenge rate\n`);
 
-const raw = await res.text();
+let body = null;
+let challenges = 0;
 
-if (!ctype.includes('json')) {
-  const challenged = /just a moment|challenges\.cloudflare\.com|cf_chl_opt/i.test(raw);
-  console.log('');
-  console.log(challenged
-    ? 'BLOCKED: Cloudflare served a bot challenge, not the API.\n' +
-      'The request was rejected before reaching the app. Retrying immediately\n' +
-      'will usually be rejected too — this is the failure mode to watch for.'
-    : `Not JSON. First 300 bytes:\n${raw.slice(0, 300)}`);
-  process.exit(2);
+for (let i = 0; i < ATTEMPTS; i++) {
+  if (i) await sleep(1_000);
+  let res, raw;
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 20_000);
+    res = await fetch(URL_, { headers: HEADERS, signal: ctl.signal });
+    clearTimeout(timer);
+    raw = await res.text();
+  } catch (err) {
+    challenges++;
+    console.log(`  ${i + 1}. network error: ${err.message}`);
+    continue;
+  }
+
+  const ctype = res.headers.get('content-type') || '(none)';
+  const mitigated = res.headers.get('cf-mitigated');
+
+  if (ctype.includes('json')) {
+    console.log(`  ${i + 1}. ${res.status} ok  (${ctype})`);
+    body ??= JSON.parse(raw);
+    continue;
+  }
+
+  challenges++;
+  const isChallenge = /just a moment|challenges\.cloudflare\.com|cf_chl_opt/i.test(raw);
+  console.log(`  ${i + 1}. ${res.status} ${isChallenge ? 'CHALLENGED' : 'non-JSON'}` +
+              `  (${ctype}${mitigated ? `, cf-mitigated: ${mitigated}` : ''})`);
+  if (!isChallenge) console.log(`     first 120 bytes: ${raw.slice(0, 120)}`);
 }
 
-const body = JSON.parse(raw);
+const rate = (challenges / ATTEMPTS * 100).toFixed(0);
+console.log(`\nchallenge rate: ${challenges}/${ATTEMPTS} (${rate}%)`);
+if (challenges === ATTEMPTS) {
+  console.log('Every probe was blocked. watch.mjs will be failing too — check the\n' +
+              'Render logs for "ERROR during check". Alerts are NOT flowing.');
+  process.exit(2);
+}
+if (challenges > 0) {
+  // p(all 4 attempts challenged) with an independence assumption — rough, but
+  // the right order of magnitude for deciding whether to raise FETCH_ATTEMPTS.
+  const pMiss = (challenges / ATTEMPTS) ** 4;
+  console.log(`At this rate a full 4-attempt cycle fails ~${(pMiss * 100).toFixed(1)}% of ticks.`);
+}
+
 const coins = body?.coins;
 if (!Array.isArray(coins)) {
   console.log(`\nUnexpected shape — no "coins" array. Keys: ${Object.keys(body || {}).join(', ')}`);
