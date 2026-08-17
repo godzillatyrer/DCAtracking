@@ -176,6 +176,25 @@ docker run -d --name ansem-tier-watch --restart unless-stopped \
   node:22-alpine node watch.mjs
 ```
 
+**Render** (a `render.yaml` blueprint is included):
+
+Dashboard → New → Blueprint → pick this repo. You'll be prompted for
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. It provisions a Background
+Worker (`$7/mo` starter) plus a 1 GB persistent disk (`$0.25/mo`) mounted at
+`/var/data`, with `STATE_FILE=/var/data/state.json`.
+
+The disk is **not** optional. Render's filesystem is ephemeral without one,
+so every deploy would reset `state.json` — and since a cold start records
+existing listings *silently*, a restart would quietly swallow any
+Gold/Diamond coin that appeared while the worker was down. No error, no
+alert, just a coin you never hear about.
+
+Two Render facts drive that shape: background workers have **no free
+instance type**, and free web services **cannot mount disks**.
+
+Auto-deploy is on, so a push restarts the worker. Harmless here — the disk
+keeps the seen-set — but turn it off if you want a frozen deployment.
+
 **cron** (coarser; the process is cheap enough that a long-running one is better):
 
 ```cron
