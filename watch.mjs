@@ -9,7 +9,9 @@
  *                          volume24hUsd, change24hPct, txns24h, teamPct, airdropPct,
  *                          airdropTotal, curvePct, creatorWallet, imageUrl,
  *                          enhancedAt, createdAt } ] }
- *   - tier is exactly "free" | "gold" | "diamond"
+ *   - tier on the wire is "free" | "bronze" | "diamond". "bronze" is what the
+ *     site renders as a GOLD badge and what /api/config keys the Gold threshold
+ *     under; we normalise it to "gold" internally.
  *   - `limit` query param is honoured, max 200. There is NO server-side tier filter
  *     (passing ?tier=gold is silently ignored), so we filter client-side.
  *   - the endpoint is served by multiple replicas that can disagree slightly, so the
@@ -25,6 +27,21 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+// ------------------------------------------------------------ tier naming
+
+// The API's wire value for Gold is "bronze" — the same name /api/config uses for
+// the Gold threshold, and what the site renders as a GOLD badge. Watching for
+// "gold" therefore matched nothing, and every Gold coin was silently skipped.
+const TIER_ALIASES = { bronze: 'gold' };
+const normTier = (t) => {
+  const s = String(t ?? '').toLowerCase();
+  return TIER_ALIASES[s] ?? s;
+};
+
+// Raw wire values, before aliasing. Drift is measured against these, so a *new*
+// alias shows up as a one-off notice rather than being silently normalised away.
+const KNOWN_RAW_TIERS = ['free', 'gold', 'diamond', 'bronze'];
+
 // ---------------------------------------------------------------- config
 
 const CFG = {
@@ -35,8 +52,9 @@ const CFG = {
   apiUrl: process.env.ANSEM_API_URL || 'https://ansem.io/api/coins',
   siteUrl: process.env.ANSEM_SITE_URL || 'https://ansem.io',
   limit: clampInt(process.env.ANSEM_LIMIT, 200, 1, 200),
-  tiers: (process.env.WATCH_TIERS || 'gold,diamond')
-    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+  // Normalised, so WATCH_TIERS=bronze and WATCH_TIERS=gold mean the same thing.
+  tiers: [...new Set((process.env.WATCH_TIERS || 'gold,diamond')
+    .split(',').map(s => normTier(s.trim())).filter(Boolean))],
   pollMs: clampInt(process.env.POLL_INTERVAL_MS, 30_000, 5_000, 3_600_000),
   stateFile: process.env.STATE_FILE || path.join(process.cwd(), 'state.json'),
   dryRun: /^(1|true|yes)$/i.test(process.env.DRY_RUN || ''),
@@ -111,6 +129,8 @@ const emptyState = () => ({
   // new product surface (a paid listing looks different from a curve launch) or
   // a schema change — both worth a message.
   knownStatuses: [],
+  // Same idea for tier values. Its absence is what made the drift notice repeat.
+  knownTiers: [],
 
   // wallet -> cumulative $ANSEM burned, as last seen. Diffed each tick.
   burners: {},
@@ -136,6 +156,7 @@ async function loadState() {
       ...parsed,
       seen: parsed.seen ?? {},
       knownStatuses: Array.isArray(parsed.knownStatuses) ? parsed.knownStatuses : [],
+      knownTiers: Array.isArray(parsed.knownTiers) ? parsed.knownTiers : [],
       burners: parsed.burners ?? {},
       recentBurns: Array.isArray(parsed.recentBurns) ? parsed.recentBurns : [],
     };
@@ -398,7 +419,6 @@ function tierBadge(tier) {
 
 // ------------------------------------------------------- paid-listing detection
 
-const KNOWN_TIERS = ['free', 'gold', 'diamond'];
 const BASELINE_STATUSES = ['on_curve', 'migrated'];
 
 /**
@@ -433,10 +453,10 @@ function recentBurnLines(state) {
 function buildMessage(coin, { upgraded, listing }, state) {
   const url = `${CFG.siteUrl}/launch/coin/${coin.mint}`;
   const headline = listing
-    ? `💰 PAID LISTING — ${tierBadge(coin.tier)}`
+    ? `💰 PAID LISTING — ${tierBadge(normTier(coin.tier))}`
     : upgraded
-      ? `${tierBadge(coin.tier)} — tier upgrade`
-      : `${tierBadge(coin.tier)} — new listing`;
+      ? `${tierBadge(normTier(coin.tier))} — tier upgrade`
+      : `${tierBadge(normTier(coin.tier))} — new listing`;
 
   const lines = [
     `<b>${esc(headline)}</b>`,
@@ -482,7 +502,7 @@ async function sendTelegram(text) {
 
 async function checkOnce(state) {
   const coins = await fetchCoins();
-  const wanted = coins.filter(c => c.tier && CFG.tiers.includes(String(c.tier).toLowerCase()));
+  const wanted = coins.filter(c => c.tier && CFG.tiers.includes(normTier(c.tier)));
   const listings = CFG.watchListings ? coins.filter(c => c.mint && isPaidListing(c)) : [];
   vlog(`fetched ${coins.length} coins, ${wanted.length} in [${CFG.tiers.join(', ')}]` +
        (CFG.watchListings ? `, ${listings.length} off-curve` : ''));
@@ -493,14 +513,14 @@ async function checkOnce(state) {
 
   for (const coin of wanted) {
     if (!coin.mint) continue;
-    const key = `${coin.mint}:${String(coin.tier).toLowerCase()}`;
+    const key = `${coin.mint}:${normTier(coin.tier)}`;
     if (state.seen[key]) continue;
 
     // Was this mint already known to us at a different (lower) tier?
     const upgraded = Object.keys(state.seen).some(k => k.startsWith(`${coin.mint}:`));
 
     state.seen[key] = {
-      tier: String(coin.tier).toLowerCase(),
+      tier: normTier(coin.tier),
       ticker: coin.ticker ?? null,
       firstAlertedAt: new Date().toISOString(),
     };
@@ -515,7 +535,7 @@ async function checkOnce(state) {
     const key = `listing:${coin.mint}`;
     if (state.seen[key]) continue;
     state.seen[key] = {
-      tier: String(coin.tier ?? '').toLowerCase(),
+      tier: normTier(coin.tier),
       ticker: coin.ticker ?? null,
       firstAlertedAt: new Date().toISOString(),
     };
@@ -530,10 +550,15 @@ async function checkOnce(state) {
   const seenStatuses = [...new Set(coins.map(c => c.status).filter(Boolean).map(String))];
   const baseline = state.knownStatuses.length ? state.knownStatuses : BASELINE_STATUSES;
   const newStatuses = seenStatuses.filter(s => !baseline.includes(s));
-  const newTiers = [...new Set(coins.map(c => String(c.tier ?? '').toLowerCase()).filter(Boolean))]
-    .filter(t => !KNOWN_TIERS.includes(t));
+  // Checked against persisted state, not a constant. Comparing to a constant
+  // meant a value the API always returns looked new on every single tick, and
+  // the notice repeated forever instead of firing once.
+  const seenTiers = [...new Set(coins.map(c => String(c.tier ?? '').toLowerCase()).filter(Boolean))];
+  const tierBaseline = state.knownTiers.length ? state.knownTiers : KNOWN_RAW_TIERS;
+  const newTiers = seenTiers.filter(t => !tierBaseline.includes(t));
 
   state.knownStatuses = [...new Set([...baseline, ...seenStatuses])];
+  state.knownTiers = [...new Set([...tierBaseline, ...seenTiers])];
 
   if (CFG.schemaDriftAlert && !isFirstRun && (newStatuses.length || newTiers.length)) {
     const bits = [];

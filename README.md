@@ -20,7 +20,7 @@ GET https://ansem.io/api/coins?limit=200
     "name": "Hyper Bull",
     "ticker": "HBULL",
     "mint": "4aAr…xTu3",          // Solana mint address — the stable identity
-    "tier": "free",                // "free" | "gold" | "diamond"
+    "tier": "free",                // "free" | "bronze" (= Gold) | "diamond"
     "status": "on_curve",          // "on_curve" | "migrated"
     "marketCapUsd": 1480000,
     "volume24hUsd": 13240000,
@@ -38,18 +38,31 @@ Things worth knowing, all verified against the live endpoint:
 
 | Fact | Consequence |
 |---|---|
-| `tier` is exactly `"free" \| "gold" \| "diamond"` | matched case-insensitively |
+| `tier` on the wire is `"free" \| "bronze" \| "diamond"` | **`bronze` is Gold** — see below |
 | `?tier=gold` is **silently ignored** — no server-side tier filter | we filter client-side |
 | `?limit=` is honoured, **max 200** (201+ returns a validation error) | we request 200 |
 | No `offset`/`page` param works, and there is no total count | the feed is a rolling window of roughly the last few hours |
 | Responses come from **several replicas that disagree** — consecutive calls returned 77, 131, 141 coins within seconds | never diff consecutive responses; we keep a persistent seen-set instead |
 | The coin page is `https://ansem.io/launch/coin/<mint>` | used for the alert link |
 
-**As of writing, every coin in the feed is `tier: "free"`.** There are currently
-zero Gold and zero Diamond listings, which is why those tabs render
-"Nothing matches." on both Home and Z500. So expect silence until the first one
-actually lands — that is the tool working, not failing. Use `DRY_RUN` plus the
-test suite to convince yourself the alerting path is live.
+Gold and Diamond coins are rare — for a long stretch the feed held none at all —
+so expect long silences. That is the tool working, not failing. Use `DRY_RUN`
+plus the test suite to convince yourself the alerting path is live.
+
+### `bronze` means Gold
+
+The API's wire value for the Gold tier is **`bronze`** — the same name
+`/api/config` uses for the Gold threshold, and what the site renders as a
+`GOLD` badge. There is no `"gold"` in the feed at all.
+
+Watching for `"gold"` therefore matched nothing and skipped every Gold coin
+silently: no error, no alert, just a tab on the site showing a coin the watcher
+never mentioned. `normTier()` maps it, and `WATCH_TIERS=bronze` and
+`WATCH_TIERS=gold` are accepted interchangeably.
+
+Drift detection deliberately runs on the **raw** wire values rather than the
+normalised ones, so a future alias surfaces as a one-off notice instead of being
+quietly folded away.
 
 ### The rolling window is ~50 minutes, and that matters
 
@@ -122,7 +135,7 @@ All via environment variables (or a `.env` file if you run with `--env-file=.env
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | required unless `DRY_RUN` |
 | `TELEGRAM_CHAT_ID` | — | required unless `DRY_RUN` |
-| `WATCH_TIERS` | `gold,diamond` | comma list of `free`/`gold`/`diamond` |
+| `WATCH_TIERS` | `gold,diamond` | `free`/`gold`/`diamond`; `bronze` is accepted as Gold |
 | `POLL_INTERVAL_MS` | `30000` | clamped to 5s–1h |
 | `STATE_FILE` | `./state.json` | dedupe memory; use an absolute path under systemd |
 | `DRY_RUN` | off | log instead of sending |
