@@ -189,6 +189,14 @@ out=$(env DRY_RUN=true RUN_ONCE=true FETCH_ATTEMPTS=1 STATE_FILE=$STATE \
       ANSEM_API_URL="http://127.0.0.1:9/api/coins" node watch.mjs 2>&1)
 check "stale alert fired" "$(echo "$out" | grep -c 'is blind')" "1"
 
+echo "== test 20a: a fresh deploy does not cry wolf on its first failed cycle =="
+rm -f $STATE
+# No lastOkAt yet. Without a boot-time default this reads as "never succeeded"
+# and would alarm seconds after start.
+out=$(env DRY_RUN=true RUN_ONCE=true FETCH_ATTEMPTS=1 STATE_FILE=$STATE \
+      ANSEM_API_URL="http://127.0.0.1:9/api/coins" node watch.mjs 2>&1)
+check "no stale alert on a fresh state file" "$(echo "$out" | grep -c 'is blind')" "0"
+
 echo "== test 20: a healthy watcher does not cry wolf =="
 rm -f $STATE
 scenario "Just Air|AIR|MINTfree1|free|on_curve"
