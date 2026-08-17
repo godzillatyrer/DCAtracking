@@ -1,6 +1,5 @@
 .env
-data/
-__pycache__/
-*.pyc
-.pytest_cache/
+state.json
+state.json.tmp
+node_modules/
 *.log
