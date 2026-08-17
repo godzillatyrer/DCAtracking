@@ -14,6 +14,14 @@ BASE_ENV=(DRY_RUN=true RUN_ONCE=true FETCH_ATTEMPTS=1 STATE_FILE=$STATE
 
 run() { env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true "$@" node watch.mjs 2>&1; }
 
+# Count alert keys in state.seen matching a mint. Not a grep over the whole file:
+# state also holds a mint -> creator index, which deliberately survives an alert
+# rollback, so a raw grep would double-count.
+seen_has() {
+  node -e "const s=JSON.parse(require('fs').readFileSync('$STATE','utf8'));
+           console.log(Object.keys(s.seen||{}).filter(k=>k.includes('$1')).length)"
+}
+
 coin() { # name ticker mint tier status
   printf '{"slug":"%s-x","name":"%s","ticker":"%s","mint":"%s","tier":"%s","status":"%s",' "$2" "$1" "$2" "$3" "$4" "$5"
   printf '"marketCapUsd":1480000,"volume24hUsd":240000,"change24hPct":126.4,"txns24h":8391,'
@@ -87,7 +95,7 @@ rm -f $STATE
 scenario "Hyper Bull|HBULL|MINTgold1|gold|migrated"
 out=$(env "${BASE_ENV[@]}" node watch.mjs 2>&1)
 check "silent on cold start" "$(echo "$out" | grep -c 'would send')" "0"
-check "but recorded it" "$(grep -c MINTgold1 $STATE)" "1"
+check "but recorded it" "$(seen_has MINTgold1)" "1"
 out=$(run)
 check "and does not alert later either" "$(echo "$out" | grep -c 'would send')" "0"
 
@@ -99,7 +107,7 @@ out=$(env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true DRY_RUN=false \
       TELEGRAM_BOT_TOKEN=x TELEGRAM_CHAT_ID=y \
       TELEGRAM_API_BASE="http://127.0.0.1:$PORT" node watch.mjs 2>&1)
 check "send failure is logged" "$(echo "$out" | grep -c 'ERROR sending alert')" "1"
-check "state rolled back" "$(grep -c MINTgold1 $STATE)" "0"
+check "state rolled back" "$(seen_has MINTgold1)" "0"
 
 echo "== test 8: bad tier name is rejected =="
 out=$(WATCH_TIERS=platinum DRY_RUN=true RUN_ONCE=true STATE_FILE=/tmp/none.json node watch.mjs 2>&1)
@@ -309,6 +317,36 @@ burners "$(burner WALLETddd 10000)"
 burners "$(burner WALLETddd 80000)"
 out=$("${S1[@]}" node watch.mjs 2>&1)
 check "burn still reported without a price" "$(echo "$out" | grep -c 'Wallet total:')" "1"
+clear_sidecars
+
+
+echo "== test 35: a burn never guesses which coin it paid for =="
+rm -f $STATE; clear_sidecars; write_config
+scenario "Just Air|AIR|MINTfree1|free|on_curve"
+burners "$(burner WALLETeee 10000)"
+"${S1[@]}" node watch.mjs >/dev/null 2>&1
+burners "$(burner WALLETeee 100000)"
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "burn alert sent" "$(echo "$out" | grep -c 'Wallet total:')" "1"
+# The burner need not own the coin — the Get Listed flow is "paste a mint, then
+# burn" — so naming one would be actionable and wrong.
+check "says the coin is not knowable" "$(echo "$out" | grep -c 'not knowable from the burn alone')" "1"
+
+echo "== test 36: a paid listing carries the recent burn as context =="
+raw_scenario "$(listed NEWLIST MINTlisted9 free listed)"
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "listing alert sent" "$(echo "$out" | grep -c 'PAID LISTING')" "1"
+check "names the recent burn" "$(echo "$out" | grep -c 'Burns in the last hour')" "1"
+check "and shows the burner wallet" "$(echo "$out" | grep -c 'WALLETeee')" "1"
+
+echo "== test 37: an old burn is not offered as context =="
+rm -f $STATE; clear_sidecars; write_config
+# a burn stamped well outside the one-hour lookback
+printf '{"seen":{},"runs":9,"lastRunAt":null,"lastOkAt":null,"staleAlertedAt":null,"lastHeartbeatAt":null,"knownStatuses":["on_curve","listed"],"burners":{},"recentBurns":[{"wallet":"WALLETold","delta":90000,"usd":26469,"at":"2020-01-01T00:00:00.000Z"}]}' > $STATE
+raw_scenario "$(listed OLDBURN MINTlisted8 free listed)"
+out=$("${S1[@]}" node watch.mjs 2>&1)
+check "listing still alerts" "$(echo "$out" | grep -c 'PAID LISTING')" "1"
+check "stale burn omitted" "$(echo "$out" | grep -c 'Burns in the last hour')" "0"
 clear_sidecars
 
 echo

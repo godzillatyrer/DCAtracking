@@ -180,6 +180,23 @@ for Gold is **`bronze`**.
 A burn is reported when it exceeds `BURN_MIN_USD`, **or** when it crosses a tier
 threshold — a crossing is the whole point, so it overrides the dust filter.
 
+### A burn does not name a coin, and it never will
+
+The Get Listed flow is *paste a mint, then burn*. The burner therefore need not
+own, have created, or have any recorded relationship with the coin being listed —
+anyone can burn on behalf of any mint. Nothing on chain and nothing in this API
+ties the two together.
+
+So the burn alert deliberately names **no coin**. An earlier version matched the
+burner against `creatorWallet` in the feed; that was wrong reasoning, and worse
+than useless — a guessed coin in an alert is actionable, so being confidently
+wrong could send you buying the wrong token.
+
+The link is recovered from the other end instead. When a paid listing does appear
+in the feed, its alert carries **the burns from the previous hour**, labelled as
+proximity in time rather than proof. That is the honest version of the answer:
+here is the coin, and here is what plausibly paid for it.
+
 If `/api/config` is unreachable the price is unknown, and an unknown price must
 not read as `$0` — otherwise every burn is dust-filtered and the alert silently
 disappears. Burns are reported without a USD figure in that case.
