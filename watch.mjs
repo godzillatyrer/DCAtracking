@@ -114,6 +114,10 @@ const emptyState = () => ({
 
   // wallet -> cumulative $ANSEM burned, as last seen. Diffed each tick.
   burners: {},
+  // Recent burns, newest last, so a listing can name the payment that bought it.
+  // Anyone may burn for any mint, so this is the only honest link between the two
+  // events: proximity in time, stated as such.
+  recentBurns: [],
   // Live values from /api/config, refreshed periodically. Never hardcode these:
   // the site renders 25,000/100,000 on /burn while the API returns 92,627/370,508,
   // because the API recomputes them from the current $ANSEM price.
@@ -133,6 +137,7 @@ async function loadState() {
       seen: parsed.seen ?? {},
       knownStatuses: Array.isArray(parsed.knownStatuses) ? parsed.knownStatuses : [],
       burners: parsed.burners ?? {},
+      recentBurns: Array.isArray(parsed.recentBurns) ? parsed.recentBurns : [],
     };
   } catch (err) {
     if (err.code !== 'ENOENT') {
@@ -265,6 +270,12 @@ async function checkBurns(state, isFirstRun) {
     if (delta <= 0) continue;
 
     const deltaUsd = price != null ? delta * price : null;
+
+    // Kept whether or not this burn is worth alerting on: its value is as context
+    // for a listing that shows up minutes later. Anyone can burn for any mint, so
+    // this is the only defensible link between the two — closeness in time.
+    state.recentBurns.push({ wallet, delta, usd: deltaUsd, at: new Date().toISOString() });
+    if (state.recentBurns.length > 20) state.recentBurns = state.recentBurns.slice(-20);
     const crossed = [];
     if (Number.isFinite(gold) && prev < gold && total >= gold) crossed.push('🥇 GOLD');
     if (Number.isFinite(diamond) && prev < diamond && total >= diamond) crossed.push('💎 DIAMOND');
@@ -280,11 +291,23 @@ async function checkBurns(state, isFirstRun) {
       `<code>${esc(wallet)}</code>`,
     ];
     if (crossed.length) {
-      lines.push('', `<b>Crosses the ${crossed.join(' and ')} threshold.</b>`,
-                 `A listing or tier upgrade for this wallet is likely next.`);
+      lines.push('', `<b>Crosses the ${crossed.join(' and ')} threshold.</b>`);
     } else if (Number.isFinite(gold) && total < gold) {
       lines.push('', `${num(gold - total, 0)} ANSEM short of Gold (${num(gold, 0)}).`);
     }
+
+    // Deliberately no coin named here. The Get Listed flow is "paste a mint, then
+    // burn", so the burner need not own or have created the coin being listed —
+    // nothing on chain or in this API ties the two together. Naming a guess would
+    // be worse than naming nothing, because it is actionable and wrong. The coin
+    // becomes knowable when it shows up in the feed, and that alert carries the
+    // burn back as context.
+    lines.push('', state.listingEnabled === true
+      ? `<i>Listings are open — if this paid a listing fee, the coin should ` +
+        `appear in the feed shortly and you'll get a separate alert naming it.</i>`
+      : `<i>Which coin this is for is not knowable from the burn alone. ` +
+        `Watch for the tier or listing alert that follows — that one names it.</i>`);
+
     notices.push(lines.join('\n'));
   }
   return notices;
@@ -392,7 +415,22 @@ function isPaidListing(coin) {
   return coin.curvePct == null && String(coin.status ?? '') !== 'on_curve';
 }
 
-function buildMessage(coin, { upgraded, listing }) {
+// How far back a burn can be and still plausibly be this listing's payment.
+const BURN_LOOKBACK_MS = 60 * 60 * 1000;
+
+function recentBurnLines(state) {
+  const cutoff = Date.now() - BURN_LOOKBACK_MS;
+  const recent = (state?.recentBurns ?? [])
+    .filter(b => Date.parse(b.at) >= cutoff)
+    .slice(-3).reverse();
+  if (!recent.length) return [];
+  return ['', `<b>Burns in the last hour</b> — one of these likely paid for it:`,
+    ...recent.map(b =>
+      `· ${num(b.delta, 0)} ANSEM${b.usd != null ? ` (~${money(b.usd)})` : ''}\n` +
+      `  <code>${esc(b.wallet)}</code>`)];
+}
+
+function buildMessage(coin, { upgraded, listing }, state) {
   const url = `${CFG.siteUrl}/launch/coin/${coin.mint}`;
   const headline = listing
     ? `💰 PAID LISTING — ${tierBadge(coin.tier)}`
@@ -412,6 +450,7 @@ function buildMessage(coin, { upgraded, listing }) {
     `<code>${esc(coin.mint)}</code>`,
     `<a href="${esc(url)}">Open on ansem.io</a>`,
   ];
+  if (listing) lines.push(...recentBurnLines(state));
   return lines.join('\n');
 }
 
@@ -558,7 +597,7 @@ async function checkOnce(state) {
 
   for (const item of fresh) {
     try {
-      await sendTelegram(buildMessage(item.coin, item));
+      await sendTelegram(buildMessage(item.coin, item, state));
       const kind = item.listing ? ' [paid listing]' : item.upgraded ? ' [upgrade]' : '';
       log(`alerted: ${item.coin.ticker} (${item.coin.tier})${kind}`);
     } catch (err) {
