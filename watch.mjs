@@ -461,6 +461,12 @@ async function main() {
 
   const state = await loadState();
 
+  // A fresh state file — first deploy, or a wiped disk — has no lastOkAt, which
+  // reads as "never succeeded" and would fire the blind alarm off a single failed
+  // cycle seconds after boot. Start the clock at process start instead, so the
+  // alarm still requires a real STALE_ALERT_MS of failure.
+  state.lastOkAt ??= new Date().toISOString();
+
   let stopping = false;
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, () => {
