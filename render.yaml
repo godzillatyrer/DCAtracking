@@ -1,0 +1,62 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploys ansem-tier-watch as a Background Worker with a small persistent
+# disk, so state.json (the mint:tier seen-set) survives restarts and
+# redeploys.
+#
+# The disk is NOT optional. Render's filesystem is ephemeral without one, so
+# every deploy would reset state.json — and because a cold start records
+# existing listings *silently*, a restart would quietly swallow any
+# Gold/Diamond coin that appeared while the worker was down. That failure is
+# invisible: no error, no alert, just a coin you never hear about.
+#
+# Cost: $7/mo (starter instance) + $0.25/mo (1 GB disk). Background workers
+# have no free instance type, and free web services cannot mount disks.
+#
+# Deploy: Render Dashboard -> New -> Blueprint -> pick this repo.
+# You'll be prompted for TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.
+
+services:
+  - type: worker
+    name: ansem-tier-watch
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install --omit=dev
+    startCommand: node watch.mjs
+    autoDeployTrigger: commit
+
+    disk:
+      name: watcher-state
+      mountPath: /var/data
+      sizeGB: 1
+
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+
+      # Persist the seen-set on the mounted disk, not the ephemeral filesystem.
+      - key: STATE_FILE
+        value: /var/data/state.json
+
+      # Prompted for at deploy time; never committed.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
+      - key: WATCH_TIERS
+        value: gold,diamond
+      # 30s is ~2,880 requests/day against an undocumented endpoint. Lower
+      # this only with a reason; 1s would be abusive and risks a block.
+      - key: POLL_INTERVAL_MS
+        value: "30000"
+      # Leave off. The first run records existing listings without alerting,
+      # which is what stops a history flood on the very first deploy.
+      - key: ALERT_ON_FIRST_RUN
+        value: "false"
+      # Logs the coin count each tick — worth having, since the live feed is
+      # currently all free-tier and silence is otherwise indistinguishable
+      # from a broken endpoint.
+      - key: VERBOSE
+        value: "true"
