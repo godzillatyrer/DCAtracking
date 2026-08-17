@@ -51,13 +51,38 @@ zero Gold and zero Diamond listings, which is why those tabs render
 actually lands — that is the tool working, not failing. Use `DRY_RUN` plus the
 test suite to convince yourself the alerting path is live.
 
-### The rolling-window caveat
+### The rolling window is ~50 minutes, and that matters
 
-Because the feed only covers a recent window and there is no pagination, a coin
-that gets upgraded to Gold *after* it has aged out of the window will never be
-seen. At a 30s poll interval with the window measured in hours this is a wide
-margin, but it is the one real gap. If it matters, drop `POLL_INTERVAL_MS` and
-keep the process up continuously rather than running it from cron.
+Measured against the live feed (`npm run inspect`): 200 coins spanning
+`17:37:24Z` down to `16:47:32Z` — **a 50-minute window at roughly 4 new coins per
+minute**, sorted strictly newest-first.
+
+Three consequences, in order of how much they should worry you:
+
+1. **Tier upgrades on older coins are invisible.** A coin promoted to Gold more
+   than ~50 minutes after it was created has already aged out, and there is no
+   pagination to go back for it. The `mint:tier` upgrade path still works, but
+   only inside that window. This is a real gap with no fix available from the
+   public API.
+2. **New arrivals are safe.** Because the sort is newest-first, anything new
+   enters at the top, so the 200-item cap cannot hide it. A paid "Get Listed"
+   coin creates a fresh record, so it arrives at the top too.
+3. **A missed poll costs nothing.** A coin sits in the window for ~100 ticks at
+   `POLL_INTERVAL_MS=30000`, so a failed fetch — or twenty — loses nothing. Only
+   an outage longer than ~50 minutes drops a coin permanently, which is what the
+   staleness alarm below is calibrated against.
+
+### Cloudflare
+
+The endpoint is behind Cloudflare and challenges a *fraction* of requests. A
+measured probe returned `1/6` challenged. With `FETCH_ATTEMPTS=4` that works out
+to roughly 0.08% of cycles failing outright — and per point 3 above, a failed
+cycle is harmless. The occasional `[debug] retry 1 in 1000ms` in the logs is this,
+and it is nothing to chase.
+
+What matters is the tail: if that fraction ever goes to 1, the loop keeps running
+and Telegram stays silent, which is indistinguishable from a quiet feed. Hence the
+staleness alarm.
 
 ---
 
@@ -106,6 +131,64 @@ All via environment variables (or a `.env` file if you run with `--env-file=.env
 | `VERBOSE` | off | log fetch counts each tick |
 | `ANSEM_LIMIT` | `200` | 1–200 |
 | `FETCH_ATTEMPTS` | `4` | retries with exponential backoff |
+| `WATCH_LISTINGS` | `true` | alert on paid "Get Listed" coins, any tier |
+| `SCHEMA_DRIFT_ALERT` | `true` | alert on an unseen `tier`/`status` value |
+| `STALE_ALERT_MS` | `600000` | alert if no fetch has succeeded in this long |
+| `HEARTBEAT_MS` | `86400000` | periodic "still alive" message; `0` disables |
+
+---
+
+## Paid listings ("Get Listed")
+
+Separately from the launchpad, a team can list an **existing** Solana token by
+burning $25,000 of $ANSEM (or airdropping that much of their own token to $ANSEM
+holders). The site then reads name, price and market cap from DexScreener.
+
+That gives a clean structural tell: **a listed coin never has a bonding curve.**
+Launchpad coins carry a `curvePct`; a listed one cannot. So the filter is
+`curvePct == null && status !== "on_curve"`, and the alert is labelled
+`💰 PAID LISTING` and fires regardless of tier.
+
+Against the live feed this currently matches **nothing** — all 200 coins were
+on-curve, and the Get Listed panel reads "Listings paused". That is the intended
+resting state: silent until listings reopen, rather than guessing and firing on
+ordinary launchpad coins.
+
+Two things this deliberately does *not* assume:
+
+- **`enhancedAt` is not the paid-listing marker.** 9 of 200 coins had it set, all
+  of them free-tier and all on a bonding curve — so it is some cheaper profile
+  upgrade, not the $25k listing. Matching on it would have produced false alerts.
+- **Burning does not visibly imply a tier.** The panel says the burn "counts
+  toward your tier", but every coin in the feed is `free`, so the thresholds are
+  unknown. A paid listing is therefore treated as its own event, not as a
+  Gold/Diamond signal.
+
+Because the real shape of a listed coin has never been observed, the schema-drift
+alert is the backstop: if a `status` or `tier` value appears that has never been
+seen before, you get a message saying so. If the filter above turns out to be
+wrong when listings reopen, that notice is what tells you.
+
+---
+
+## When it breaks
+
+Silence from this tool is ambiguous — it means either "no Gold coins" or "I have
+been unable to read the API for two days". Three messages resolve that:
+
+| Message | When |
+|---|---|
+| 🔴 **is blind** | no successful fetch in `STALE_ALERT_MS` (default 10 min) |
+| 🟢 **recovered** | the next successful fetch after a blind alert |
+| 💚 **alive** | every `HEARTBEAT_MS` (default 24h), with counts |
+
+The 10-minute default is deliberate: the feed holds ~50 minutes of history, so an
+outage is only *destructive* past that point. Ten minutes leaves a wide margin
+while still reaching you in the same hour.
+
+`lastOkAt` lives in the state file rather than in memory, so a crash-loop cannot
+reset the clock and suppress the alarm — which is precisely the scenario where
+you most need it.
 
 ---
 
