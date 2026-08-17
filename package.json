@@ -9,6 +9,7 @@
     "start": "node watch.mjs",
     "once": "RUN_ONCE=true node watch.mjs",
     "dry": "DRY_RUN=true RUN_ONCE=true VERBOSE=true node watch.mjs",
+    "inspect": "node tools/inspect.mjs",
     "test": "bash test/run-tests.sh"
   }
 }

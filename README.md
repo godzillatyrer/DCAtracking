@@ -203,6 +203,22 @@ keeps the seen-set — but turn it off if you want a frozen deployment.
 
 ---
 
+## Inspecting the live feed
+
+```bash
+npm run inspect
+```
+
+Read-only: no state written, no Telegram. Prints the HTTP status and
+content-type (so a Cloudflare challenge is obvious rather than showing up as a
+JSON parse error), a breakdown of every `tier`/`status`/`enhancedAt`/
+`pairAddress`/`curvePct` shape present, whether the feed is sorted newest-first,
+and any coins that look like paid "Get Listed" entries rather than launchpad
+launches.
+
+Useful for two open questions: which field marks a paid listing, and whether the
+200-item cap can hide a new one.
+
 ## Tests
 
 ```bash
@@ -221,6 +237,15 @@ an unreachable API not crashing the loop.
 - This is an **undocumented endpoint**. It can change shape or disappear without
   notice. If alerts stop, run `npm run dry -- ` with `VERBOSE=true` and check the
   logged coin count first.
+- **The endpoint sits behind Cloudflare.** A request with node's default
+  user-agent gets a `Just a moment...` bot challenge (HTTP 403, HTML body)
+  instead of JSON. `watch.mjs` sends `accept: application/json` and a
+  `user-agent` of `ansem-tier-watch/1.0`, which gets through — do not drop
+  those headers. Occasional `[debug] retry 1 in 1000ms` lines are consistent
+  with intermittent challenges; the retry absorbs them. Sustained challenges
+  would exhaust all `FETCH_ATTEMPTS` and log `ERROR during check`, which is
+  **stdout only, with no Telegram alert** — so it looks exactly like a quiet
+  feed. Watch the verbose coin count to tell the two apart.
 - Keep the poll interval sane. 30s is ~2,880 requests/day, which is unremarkable;
   1s would be abusive and may get you blocked.
 - Never commit `.env` or `state.json`.
