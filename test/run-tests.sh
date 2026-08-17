@@ -115,6 +115,104 @@ out=$(env DRY_RUN=true RUN_ONCE=true FETCH_ATTEMPTS=1 STATE_FILE=$STATE \
       ANSEM_API_URL="http://127.0.0.1:9/api/coins" node watch.mjs 2>&1)
 check "logs error and exits cleanly" "$(echo "$out" | grep -c 'ERROR during check')" "1"
 
+
+# --- paid "Get Listed" coins ------------------------------------------------
+# A listed coin is an existing Solana token, so it has no bonding curve. Every
+# coin in the live feed had a curve, which is why the plain `coin` helper sets
+# curvePct:100 and these tests need their own shape.
+raw_scenario() { printf '[%s]' "$1" > $SCEN
+  node -e "JSON.parse(require('fs').readFileSync('$SCEN','utf8'))" || { echo "  ERROR: bad JSON"; exit 1; }
+}
+listed() { # ticker mint tier status
+  printf '{"slug":"%s-x","name":"%s","ticker":"%s","mint":"%s","tier":"%s","status":"%s",' "$1" "$1" "$1" "$2" "$3" "$4"
+  printf '"marketCapUsd":9200000,"volume24hUsd":1100000,"change24hPct":12.5,"txns24h":420,'
+  printf '"teamPct":null,"airdropPct":null,"curvePct":null,"imageUrl":null,"description":null,'
+  printf '"creatorWallet":null,"airdropTotal":null,"pairAddress":"PAIR1","priceUsd":0.02,'
+  printf '"enhancedAt":null,"createdAt":"2026-08-17T17:00:00.000Z"}'
+}
+
+echo "== test 11: a paid listing alerts even though its tier is free =="
+rm -f $STATE
+raw_scenario "$(listed LISTED MINTlisted1 free listed)"
+out=$(run)
+check "paid listing alerts" "$(echo "$out" | grep -c 'PAID LISTING')" "1"
+
+echo "== test 12: the same listing does not alert twice =="
+out=$(run)
+check "deduped on rerun" "$(echo "$out" | grep -c 'would send')" "0"
+
+echo "== test 13: launchpad coins are never treated as paid listings =="
+rm -f $STATE
+scenario "Just Air|AIR|MINTfree1|free|on_curve"
+out=$(run)
+check "on-curve free coin stays silent" "$(echo "$out" | grep -c 'would send')" "0"
+
+echo "== test 14: WATCH_LISTINGS=false disables it =="
+rm -f $STATE
+raw_scenario "$(listed LISTED MINTlisted1 free listed)"
+out=$(env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true WATCH_LISTINGS=false node watch.mjs 2>&1)
+check "no listing alert when disabled" "$(echo "$out" | grep -c 'would send')" "0"
+
+echo "== test 15: a gold paid listing sends one message, not two =="
+rm -f $STATE
+raw_scenario "$(listed LISTED MINTlisted2 gold listed)"
+out=$(run)
+check "single message for both axes" "$(echo "$out" | grep -c 'would send')" "1"
+
+# --- schema drift -----------------------------------------------------------
+echo "== test 16: an unknown status is reported =="
+rm -f $STATE
+scenario "Just Air|AIR|MINTfree1|free|on_curve"
+run >/dev/null                                    # establish the baseline silently
+raw_scenario "$(listed WEIRD MINTweird1 free brand_new_status)"
+out=$(run)
+check "schema drift reported" "$(echo "$out" | grep -c 'changed shape')" "1"
+
+echo "== test 17: drift is reported once, not every tick =="
+out=$(run)
+check "drift not repeated" "$(echo "$out" | grep -c 'changed shape')" "0"
+
+echo "== test 18: SCHEMA_DRIFT_ALERT=false disables it =="
+rm -f $STATE
+scenario "Just Air|AIR|MINTfree1|free|on_curve"
+env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true SCHEMA_DRIFT_ALERT=false node watch.mjs >/dev/null 2>&1
+raw_scenario "$(listed WEIRD MINTweird2 free another_status)"
+out=$(env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true SCHEMA_DRIFT_ALERT=false node watch.mjs 2>&1)
+check "no drift notice when disabled" "$(echo "$out" | grep -c 'changed shape')" "0"
+
+# --- liveness ---------------------------------------------------------------
+echo "== test 19: a blind watcher alerts instead of failing silently =="
+rm -f $STATE
+# lastOkAt far in the past + an unreachable API => the staleness alarm must fire
+printf '{"seen":{},"runs":5,"lastRunAt":null,"lastOkAt":"2020-01-01T00:00:00.000Z","staleAlertedAt":null,"lastHeartbeatAt":null,"knownStatuses":["on_curve"]}' > $STATE
+out=$(env DRY_RUN=true RUN_ONCE=true FETCH_ATTEMPTS=1 STATE_FILE=$STATE \
+      ANSEM_API_URL="http://127.0.0.1:9/api/coins" node watch.mjs 2>&1)
+check "stale alert fired" "$(echo "$out" | grep -c 'is blind')" "1"
+
+echo "== test 20: a healthy watcher does not cry wolf =="
+rm -f $STATE
+scenario "Just Air|AIR|MINTfree1|free|on_curve"
+out=$(run)
+check "no stale alert while healthy" "$(echo "$out" | grep -c 'is blind')" "0"
+
+echo "== test 21: recovery is announced after a stale alert =="
+rm -f $STATE
+scenario "Just Air|AIR|MINTfree1|free|on_curve"
+printf '{"seen":{},"runs":5,"lastRunAt":null,"lastOkAt":"2020-01-01T00:00:00.000Z","staleAlertedAt":"2020-01-01T00:00:00.000Z","lastHeartbeatAt":null,"knownStatuses":["on_curve"]}' > $STATE
+out=$(run)
+check "recovery announced" "$(echo "$out" | grep -c 'alerted: recovered')" "1"
+
+echo "== test 22: heartbeat fires once the interval has elapsed =="
+rm -f $STATE
+scenario "Just Air|AIR|MINTfree1|free|on_curve"
+printf '{"seen":{},"runs":9,"lastRunAt":null,"lastOkAt":null,"staleAlertedAt":null,"lastHeartbeatAt":"2020-01-01T00:00:00.000Z","knownStatuses":["on_curve"]}' > $STATE
+out=$(env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true HEARTBEAT_MS=60000 node watch.mjs 2>&1)
+check "heartbeat sent" "$(echo "$out" | grep -c 'alive')" "1"
+
+echo "== test 23: heartbeat stays quiet inside the interval =="
+out=$(env "${BASE_ENV[@]}" ALERT_ON_FIRST_RUN=true HEARTBEAT_MS=3600000 node watch.mjs 2>&1)
+check "no premature heartbeat" "$(echo "$out" | grep -c 'alive')" "0"
+
 echo
 echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]
